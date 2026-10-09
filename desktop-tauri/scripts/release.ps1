@@ -27,13 +27,13 @@ $latest = @{
   platforms = @{ "windows-x86_64" = @{ signature = $sig.Trim(); url = "https://github.com/$owner/$repo/releases/download/v$version/$($exe.Name)" } }
 }
 $latestPath = Join-Path $dir "latest.json"
-$latest | ConvertTo-Json -Depth 5 | Set-Content $latestPath -Encoding utf8
+[IO.File]::WriteAllText((Resolve-Path $dir).Path + "\latest.json", ($latest | ConvertTo-Json -Depth 5), (New-Object Text.UTF8Encoding($false)))
 
 Write-Host "== Tag & push =="
 git add -A; git commit -m "Release v$version" --allow-empty | Out-Null
 git tag -f "v$version"; git push origin main; git push -f origin "v$version"
 
 Write-Host "== GitHub Release =="
-gh release delete "v$version" --yes 2>$null
+try { gh release delete "v$version" --yes 2>$null } catch {}
 gh release create "v$version" $exe.FullName $latestPath --title "NaturalVoice v$version" --notes $Notes
 Write-Host "Xong: https://github.com/$owner/$repo/releases/tag/v$version"
