@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NaturalVoice</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="h-screen overflow-hidden bg-canvas font-sans text-base text-ink antialiased" style="color-scheme: dark">
+    <div class="grid h-full grid-rows-[44px_1fr_28px]">
+
+      <!-- Thanh tiêu đề -->
+      <header class="flex items-center justify-between border-b border-line bg-surface px-4">
+        <div class="flex items-baseline gap-3">
+          <span class="text-[15px] font-semibold tracking-tight">NaturalVoice</span>
+          <span id="appVersion" class="text-xs text-ink-3"></span>
+          <span class="text-xs text-ink-3">Text &amp; subtitle sang giọng nói qua AIVIE</span>
+        </div>
+        <div class="flex items-center gap-4 text-sm">
+          <span class="text-ink-2">Credit <strong id="creditBalance" class="font-semibold text-ink">-</strong></span>
+          <span class="text-ink-2">Render đồng thời <strong id="concurrentLimit" class="font-semibold text-ink">-</strong></span>
+          <span id="connectionStatus" data-state="off" class="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium">
+            <span class="h-1.5 w-1.5 rounded-full bg-current"></span><span id="connectionText">Chưa kết nối</span>
+          </span>
+        </div>
+      </header>
+
+      <!-- Thân -->
+      <div class="grid min-h-0 grid-cols-[320px_1fr]">
+
+        <!-- Cột cài đặt -->
+        <aside class="min-h-0 overflow-y-auto border-r border-line bg-surface">
+          <section class="side-section">
+            <h2>AIVIE API</h2>
+            <div class="space-y-2.5">
+              <label class="field"><span>Endpoint</span><input id="mcpUrl" class="input" value="https://app.aivie.pro/api/v1/mcp" /></label>
+              <label class="field"><span>API key</span><input id="apiKey" class="input" type="password" placeholder="Dán key, Bearer, JSON MCP hoặc lệnh Claude" /></label>
+              <div class="flex gap-1.5">
+                <button id="connectBtn" class="btn btn-primary flex-1 justify-center">Kết nối</button>
+                <button id="saveKeyBtn" class="btn">Lưu key</button>
+                <button id="clearKeyBtn" class="btn">Xoá</button>
+              </div>
+              <select id="toolSelect" class="input"></select>
+              <div class="flex gap-1.5">
+                <button id="refreshBalanceBtn" class="btn btn-sm">Cập nhật credit</button>
+                <button id="jobsBtn" class="btn btn-sm">Jobs</button>
+              </div>
+              <p id="keyHint" class="text-xs text-ink-3">Key lưu trên máy này, không gửi đi đâu khác.</p>
+            </div>
+          </section>
+
+          <section class="side-section">
+            <h2>Voice</h2>
+            <div class="space-y-2.5">
+              <div class="field"><span>Tên hoặc Voice ID</span>
+                <div class="flex gap-1.5"><input id="voiceName" class="input" placeholder="Tên voice hoặc Voice ID" /><button id="searchVoiceBtn" class="btn">Tìm</button></div>
+              </div>
+              <label class="field"><span>Voice ID đang dùng</span><input id="voiceId" class="input font-mono text-xs" placeholder="Chọn từ kết quả tìm hoặc dán ID" /></label>
+              <p id="voiceMeta" class="-mt-1 text-xs text-ink-3">Chưa chọn voice.</p>
+              <select id="voiceResults" size="4" class="input h-auto py-1 font-normal"></select>
+              <div class="flex gap-1.5">
+                <button id="addVoiceBtn" class="btn btn-sm">+ Thêm vào Library</button>
+                <button id="voiceLibraryBtn" class="btn btn-sm">Library (Vip+)</button>
+              </div>
+              <div class="grid grid-cols-2 gap-2">
+                <label class="field"><span>Model</span>
+                  <select id="model" class="input">
+                    <optgroup label="Trọn gói AIVIE">
+                      <option value="eleven_v3" selected>Eleven v3</option>
+                      <option value="eleven_v4">Eleven v4</option>
+                      <option value="eleven_v4_turbo">Eleven v4 Turbo</option>
+                      <option value="eleven_multilingual_v2">Multilingual v2</option>
+                      <option value="minimax_speech_2_8_hd">MiniMax 2.8 HD</option>
+                      <option value="minimax_speech_2_8_turbo">MiniMax 2.8 Turbo</option>
+                    </optgroup>
+                    <optgroup label="Key riêng">
+                      <option value="el_eleven_v4">Eleven v4</option>
+                      <option value="el_eleven_v3">Eleven v3</option>
+                      <option value="el_eleven_multilingual_v2">Multilingual v2</option>
+                      <option value="el_eleven_flash_v2_5">Eleven Flash v2.5</option>
+                      <option value="dv_minimax_speech_2_8_hd">MiniMax 2.8 HD</option>
+                      <option value="dv_minimax_speech_2_8_turbo">MiniMax 2.8 Turbo</option>
+                    </optgroup>
+                  </select>
+                </label>
+                <label class="field"><span>Ngôn ngữ</span>
+                  <select id="language" class="input">
+                    <option value="auto" selected>Tự nhận (theo voice)</option>
+                    <option value="vi">Tiếng Việt</option>
+                    <option value="en">English</option>
+                    <option value="zh">中文 (Chinese)</option>
+                    <option value="ja">日本語 (Japanese)</option>
+                    <option value="ko">한국어 (Korean)</option>
+                    <option value="th">ไทย (Thai)</option>
+                    <option value="id">Bahasa Indonesia</option>
+                    <option value="ms">Bahasa Melayu</option>
+                    <option value="fil">Filipino</option>
+                    <option value="hi">हिन्दी (Hindi)</option>
+                    <option value="ta">தமிழ் (Tamil)</option>
+                    <option value="ar">العربية (Arabic)</option>
+                    <option value="tr">Türkçe</option>
+                    <option value="ru">Русский (Russian)</option>
+                    <option value="uk">Українська</option>
+                    <option value="pl">Polski</option>
+                    <option value="cs">Čeština</option>
+                    <option value="sk">Slovenčina</option>
+                    <option value="hu">Magyar</option>
+                    <option value="ro">Română</option>
+                    <option value="bg">Български</option>
+                    <option value="el">Ελληνικά (Greek)</option>
+                    <option value="de">Deutsch</option>
+                    <option value="nl">Nederlands</option>
+                    <option value="fr">Français</option>
+                    <option value="es">Español</option>
+                    <option value="pt">Português</option>
+                    <option value="it">Italiano</option>
+                    <option value="sv">Svenska</option>
+                    <option value="da">Dansk</option>
+                    <option value="no">Norsk</option>
+                    <option value="fi">Suomi</option>
+                    <option value="he">עברית (Hebrew)</option>
+                    <option value="fa">فارسی (Persian)</option>
+                    <option value="bn">বাংলা (Bengali)</option>
+                    <option value="ur">اردو (Urdu)</option>
+                    <option value="sw">Kiswahili</option>
+                  </select>
+                </label>
+              </div>
+            </div>
+          </section>
+
+          <section class="side-section">
+            <label class="check mb-2.5 font-semibold text-ink"><input id="useSettings" type="checkbox" checked /> Tuỳ chỉnh giọng</label>
+            <div class="grid grid-cols-2 gap-2">
+              <label class="field"><span>Tốc độ</span><input id="speed" class="input" type="number" step="0.01" value="1.20" /></label>
+              <label class="field"><span>Stability</span><input id="stability" class="input" type="number" value="50" /></label>
+              <label class="field"><span>Similarity</span><input id="similarity" class="input" type="number" value="75" /></label>
+              <label class="field"><span>Style</span><input id="style" class="input" type="number" value="1" /></label>
+            </div>
+            <label class="check mt-2.5"><input id="speakerBoost" type="checkbox" checked /> Speaker boost</label>
+            <p class="mt-1.5 text-xs text-ink-3">AIVIE hiện chỉ nhận tốc độ và ngôn ngữ. Các ô còn lại dành cho model key riêng.</p>
+          </section>
+
+          <section class="side-section border-b-0">
+            <h2>Tuỳ chọn chạy</h2>
+            <div class="space-y-2">
+              <label class="check"><input id="autoSrt" type="checkbox" checked /> Tự tạo SRT và ghép full MP3</label>
+              <label class="check"><input id="loopMode" type="checkbox" /> Tự chạy lại khi lỗi</label>
+              <label class="check"><input id="autoSplit" type="checkbox" /> Tự tách câu file lẻ</label>
+              <label class="check"><input id="estimateBeforeRender" type="checkbox" /> Ước tính credit trước khi render</label>
+              <div class="grid grid-cols-2 gap-2 pt-1">
+                <label class="field"><span>Job song song</span>
+                  <select id="concurrency" class="input"><option>1</option><option>2</option><option selected>3</option><option>4</option><option>5</option></select>
+                </label>
+                <label class="field"><span>Delay giữa 2 job (giây)</span><input id="callDelay" class="input" type="number" min="0" max="60" step="0.5" value="2" /></label>
+                <label class="field"><span>Ký tự tách</span><input id="splitChars" class="input" value=".,?!?。" /></label>
+                <label class="field"><span>Max credit</span><input id="maxCredits" class="input" type="number" min="1" placeholder="∞" /></label>
+              </div>
+              <p class="text-xs text-ink-3">AIVIE cho phép tối đa <strong id="concurrentHint" class="font-medium text-ink-2">-</strong> job cùng lúc. Clip vẫn lưu đúng thư mục và số thứ tự dù xong không theo thứ tự.</p>
+            </div>
+          </section>
+
+          <!-- Giữ id để app.js hoạt động, nhưng ẩn khỏi giao diện -->
+          <section class="side-section border-b-0" hidden>
+            <label class="check font-semibold text-ink"><input id="showAdvanced" type="checkbox" /> Tên trường gửi lên MCP</label>
+            <div id="advancedFields" class="mt-2.5 grid grid-cols-2 gap-2" hidden>
+              <label class="field"><span>Text</span><input id="textField" class="input" value="text" /></label>
+              <label class="field"><span>Voice</span><input id="voiceField" class="input" value="voice_id" /></label>
+              <label class="field"><span>Model</span><input id="modelField" class="input" value="model" /></label>
+              <label class="field"><span>Settings</span><input id="settingsField" class="input" value="voice_settings" /></label>
+              <label class="field"><span>Language</span><input id="languageField" class="input" value="language" /></label>
+            </div>
+          </section>
+        </aside>
+
+        <!-- Vùng chính -->
+        <main class="grid min-h-0 grid-rows-[auto_1fr_auto] gap-3 overflow-hidden p-3">
+
+          <!-- Batch Job -->
+          <section class="panel">
+            <div class="panel-head">
+              <h2 class="whitespace-nowrap">Batch Job</h2>
+              <div class="flex items-center gap-1.5">
+                <input id="batchFolderInput" type="file" accept=".txt" webkitdirectory multiple hidden />
+                <input id="batchFolderName" class="input w-[420px]" placeholder="Đường dẫn thư mục chứa .txt, hoặc bấm … để chọn" />
+                <button id="batchImportBtn" class="btn" title="Chọn thư mục">…</button>
+                <button id="scanPathBtn" class="btn">Quét thư mục</button>
+                <button id="clearBtn" class="btn">Xoá danh sách</button>
+                <span class="mx-1 h-5 w-px bg-line"></span>
+                <button id="batchRunBtn" class="btn btn-primary">Chạy hàng loạt</button>
+                <button id="batchStopBtn" class="btn btn-danger">Stop</button>
+              </div>
+            </div>
+            <div class="max-h-[132px] overflow-y-auto">
+              <table class="w-full border-collapse">
+                <thead><tr><th class="th w-10">#</th><th class="th">File</th><th class="th w-24">Dòng</th><th class="th w-40">Trạng thái</th><th class="th w-56">Thư mục output</th></tr></thead>
+                <tbody id="batchFilesRows"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <!-- Subtitles -->
+          <section class="panel grid min-h-0 grid-rows-[auto_1fr]">
+            <div class="border-b border-line">
+              <div class="flex h-10 items-center justify-between gap-2 px-3">
+                <h2 id="queueTitle" class="truncate text-sm font-semibold text-ink">Subtitles <span id="queueSummary" class="ml-1 font-normal text-ink-3">Chưa có dòng nào</span></h2>
+                <div class="flex shrink-0 items-center gap-1.5">
+                  <button id="retryBtn" class="btn">Chạy lại lỗi</button>
+                  <button id="startBtn" class="btn btn-primary">Start</button>
+                  <button id="stopBtn" class="btn btn-danger">Stop</button>
+                </div>
+              </div>
+              <div class="flex items-center gap-1.5 border-t border-line/70 bg-canvas/40 px-3 py-1.5">
+                <input id="singleFileInput" type="file" accept=".srt,.txt,.dgt" multiple hidden />
+                <input id="singleFolderInput" type="file" accept=".srt,.txt,.dgt" webkitdirectory multiple hidden />
+                <button id="importFileBtn" class="btn btn-sm">Nhập file</button>
+                <button id="importFolderBtn" class="btn btn-sm">Nhập thư mục</button>
+                <button id="importVoiceBtn" class="btn btn-sm">Nhập voice</button>
+                <span class="mx-1 h-4 w-px bg-line"></span>
+                <button id="joinBtn" class="btn btn-sm">Ghép MP3 + tạo SRT</button>
+                <button id="saveSrtBtn" class="btn btn-sm">Chỉ tạo SRT</button>
+                <button id="downloadSrtBtn" class="btn btn-sm" hidden>Tải SRT</button>
+                <button id="downloadAllAudioBtn" class="btn btn-sm" hidden>Tải audio</button>
+                <button id="openOutputBtn" class="btn btn-sm">Mở thư mục output</button>
+                <span class="ml-auto text-xs text-ink-3">Kéo thả file .srt/.txt vào bảng</span>
+              </div>
+            </div>
+            <div id="dropZone" class="relative min-h-0 overflow-y-auto">
+              <table class="w-full border-collapse">
+                <thead><tr><th class="th w-10">#</th><th class="th w-14">Part</th><th class="th">Text</th><th class="th w-36">Trạng thái</th><th class="th w-28">Output</th></tr></thead>
+                <tbody id="rows"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <!-- Log -->
+          <section class="panel">
+            <details open>
+              <summary class="flex h-9 cursor-pointer select-none items-center justify-between px-3 text-sm font-semibold marker:content-none">
+                <span>Log</span>
+                <span id="logCount" class="text-xs font-normal text-ink-3">0 dòng</span>
+              </summary>
+              <pre id="log" class="m-0 h-[120px] overflow-y-auto border-t border-line px-3 py-2 font-mono text-xs leading-[18px] text-ink-2 whitespace-pre-wrap"></pre>
+            </details>
+          </section>
+
+          <!-- Jobs panel (ẩn mặc định) -->
+          <section id="jobsPanel" class="panel" hidden>
+            <div class="panel-head"><h2>Jobs AIVIE</h2><button id="refreshJobsBtn" class="btn btn-sm">Cập nhật</button></div>
+            <table class="w-full border-collapse"><thead><tr><th class="th">Job ID</th><th class="th">Tiêu đề</th><th class="th">Trạng thái</th><th class="th">Credit</th><th class="th"></th></tr></thead><tbody id="jobsRows"></tbody></table>
+          </section>
+        </main>
+      </div>
+
+      <!-- Thanh tiến độ đáy -->
+      <footer class="flex items-center gap-3 border-t border-line bg-surface px-4 text-xs text-ink-2">
+        <span id="statusLabel" class="font-medium text-ink">Sẵn sàng</span>
+        <div class="h-1.5 w-64 overflow-hidden rounded-full bg-raised"><div id="statusBar" class="h-full w-0 bg-brand transition-[width]"></div></div>
+        <span id="statusLines">0 / 0 dòng</span>
+        <span class="text-ink-3">·</span>
+        <span id="statusFiles">File 0 / 0</span>
+        <span class="text-ink-3">·</span>
+        <span id="statusActive">0 job đang render</span>
+        <span id="statusOutput" class="ml-auto truncate text-ink-3"></span>
+      </footer>
+    </div>
+
+    <!-- Popup cập nhật -->
+    <div id="updateModal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/60 p-4">
+      <div class="w-full max-w-md rounded-lg border border-line bg-surface shadow-2xl">
+        <div class="border-b border-line px-5 py-3">
+          <h2 class="text-sm font-semibold text-ink">Có phiên bản mới</h2>
+          <p id="updateVersion" class="mt-0.5 text-xs text-ink-3"></p>
+        </div>
+        <div id="updateNotes" class="max-h-48 overflow-y-auto whitespace-pre-wrap px-5 py-3 text-sm text-ink-2"></div>
+        <div id="updateProgress" class="hidden px-5 pb-3">
+          <div class="h-1.5 w-full overflow-hidden rounded-full bg-raised"><div id="updateBar" class="h-full w-0 bg-brand transition-[width]"></div></div>
+          <p id="updateProgressText" class="mt-1.5 text-xs text-ink-3">Đang tải…</p>
+        </div>
+        <div class="flex justify-end gap-2 border-t border-line px-5 py-3">
+          <button id="updateLaterBtn" class="btn">Để sau</button>
+          <button id="updateNowBtn" class="btn btn-primary">Cập nhật ngay</button>
+        </div>
+      </div>
+    </div>
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,23 @@
+# Dependencies / build
+node_modules/
+**/target/
+app/output/
+app/public/indexdemo.html
+backup/
+work/
+*.log
+
+# Local secrets: API key & signing key. KHÔNG commit.
+app/data/local-config.json
+native-slint/naturalvoice-config.json
+desktop-tauri/.tauri-keys/
+*.key
+
+# Tauri gen
+desktop-tauri/src-tauri/gen/schemas/
+desktop-tauri/src-tauri/resources/ffmpeg.exe
+
+# Old prototypes
+desktop-demo/
+native-egui/
+native-slint/
