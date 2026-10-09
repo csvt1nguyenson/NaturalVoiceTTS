@@ -14,7 +14,7 @@ Write-Host "== Build v$version =="
 Set-Location $root\..\app; npm run build:css | Out-Null; Set-Location $root
 $env:TAURI_SIGNING_PRIVATE_KEY = (Get-Content .tauri-keys\naturalvoice.key -Raw).Trim()
 $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
-npx tauri build
+npx tauri build --ci
 if ($LASTEXITCODE -ne 0) { throw "tauri build thất bại" }
 
 $dir = "src-tauri\target\release\bundle\nsis"
