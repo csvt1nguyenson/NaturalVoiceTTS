@@ -192,8 +192,9 @@
               </div>
             </div>
             <div class="max-h-[132px] overflow-y-auto">
-              <table class="w-full border-collapse">
-                <thead><tr><th class="th w-10">#</th><th class="th">File</th><th class="th w-24">Dòng</th><th class="th w-40">Trạng thái</th><th class="th w-56">Thư mục output</th></tr></thead>
+              <table class="w-full table-fixed border-collapse">
+                <colgroup><col class="w-10" /><col /><col class="w-20" /><col class="w-32" /><col class="w-[38%]" /></colgroup>
+                <thead><tr><th class="th">#</th><th class="th">File</th><th class="th">Dòng</th><th class="th">Trạng thái</th><th class="th">Thư mục output</th></tr></thead>
                 <tbody id="batchFilesRows"></tbody>
               </table>
             </div>
@@ -262,6 +263,11 @@
         <span class="text-ink-3">·</span>
         <span id="statusActive">0 job đang render</span>
         <span id="statusOutput" class="ml-auto truncate text-ink-3"></span>
+        <span class="flex shrink-0 items-center gap-1 border-l border-line pl-3" title="Cỡ chữ (Ctrl + / Ctrl − / Ctrl 0)">
+          <button id="zoomOutBtn" class="btn btn-sm h-5 px-1.5">A−</button>
+          <span id="zoomValue" class="w-10 text-center tabular-nums text-ink-2">100%</span>
+          <button id="zoomInBtn" class="btn btn-sm h-5 px-1.5">A+</button>
+        </span>
       </footer>
     </div>
 

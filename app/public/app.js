@@ -148,7 +148,7 @@ function renderBatchFiles() {
     return `
     <tr class="cursor-pointer" aria-selected="${file.source === state.activeSource}" data-source="${escapeHtml(file.source)}">
       <td class="td text-ink-3">${index + 1}</td>
-      <td class="td">${escapeHtml(file.name)}</td>
+      <td class="td truncate" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</td>
       <td class="td text-ink-2">${done} / ${items.length}</td>
       <td class="td">${pill}</td>
       <td class="td truncate text-xs text-ink-3" title="${escapeHtml(folder)}">${escapeHtml(folder)}</td>
@@ -1118,6 +1118,42 @@ async function checkForUpdate(manual = false) {
     if (manual) log(`Không kiểm tra được cập nhật: ${error.message || error}`);
   }
 }
+
+// ---------- Tỉ lệ giao diện (zoom) ----------
+const ZOOM_STEPS = [0.85, 0.9, 1, 1.1, 1.2, 1.3, 1.45, 1.6];
+function defaultZoom() {
+  const w = window.screen?.width || 1920;
+  if (w >= 3200) return 1.45;
+  if (w >= 2400) return 1.2;
+  if (w >= 1900) return 1.05;
+  return 1;
+}
+function applyZoom(value) {
+  const z = Math.min(1.6, Math.max(0.85, Number(value) || 1));
+  document.documentElement.style.zoom = String(z);
+  if ($("zoomValue")) $("zoomValue").textContent = `${Math.round(z * 100)}%`;
+  try { localStorage.setItem("nv.zoom", String(z)); } catch {}
+  return z;
+}
+function stepZoom(dir) {
+  const current = Number(document.documentElement.style.zoom || 1);
+  const idx = ZOOM_STEPS.findIndex((v) => Math.abs(v - current) < 0.01);
+  const next = dir === 0 ? defaultZoom() : ZOOM_STEPS[Math.min(ZOOM_STEPS.length - 1, Math.max(0, (idx < 0 ? 2 : idx) + dir))];
+  applyZoom(next);
+}
+(() => {
+  let saved = null;
+  try { saved = localStorage.getItem("nv.zoom"); } catch {}
+  applyZoom(saved ? Number(saved) : defaultZoom());
+  $("zoomInBtn")?.addEventListener("click", () => stepZoom(1));
+  $("zoomOutBtn")?.addEventListener("click", () => stepZoom(-1));
+  document.addEventListener("keydown", (e) => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    if (e.key === "=" || e.key === "+") { e.preventDefault(); stepZoom(1); }
+    else if (e.key === "-") { e.preventDefault(); stepZoom(-1); }
+    else if (e.key === "0") { e.preventDefault(); stepZoom(0); }
+  });
+})();
 
 async function bootConnection() {
   if ($("advancedFields")) $("advancedFields").hidden = true;
