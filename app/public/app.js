@@ -1090,7 +1090,7 @@ async function checkForUpdate(manual = false) {
     const update = await updater.check();
     if (!update) { if (manual) log("Đang dùng phiên bản mới nhất."); return; }
     $("updateVersion").textContent = `Phiên bản ${update.version}${update.date ? ` · ${String(update.date).slice(0, 10)}` : ""}`;
-    $("updateNotes").textContent = update.body || "Không có ghi chú.";
+    $("updateNotes").textContent = "Có bản cập nhật mới. Bấm Cập nhật ngay để tải và cài đặt, app sẽ tự mở lại.";
     $("updateModal").classList.remove("hidden"); $("updateModal").classList.add("flex");
     $("updateNowBtn").onclick = async () => {
       $("updateNowBtn").disabled = true; $("updateLaterBtn").disabled = true;

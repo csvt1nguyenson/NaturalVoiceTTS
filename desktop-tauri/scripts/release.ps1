@@ -1,6 +1,6 @@
 # Phát hành phiên bản mới lên GitHub Releases kèm latest.json cho auto-update.
 # Dùng: npm run release -- -Notes "Mô tả thay đổi"
-param([string]$Notes = "Cập nhật NaturalVoice")
+param([string]$Notes = "Co ban cap nhat moi.")
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
@@ -18,7 +18,8 @@ npx tauri build --ci
 if ($LASTEXITCODE -ne 0) { throw "tauri build thất bại" }
 
 $dir = "src-tauri\target\release\bundle\nsis"
-$exe = Get-ChildItem $dir -Filter "*_x64-setup.exe" | Select-Object -First 1
+$exe = Get-Item (Join-Path $dir "NaturalVoice_${version}_x64-setup.exe")
+if (-not (Test-Path "$($exe.FullName).sig")) { throw "Thiếu file chữ ký $($exe.Name).sig" }
 $sig = Get-Content "$($exe.FullName).sig" -Raw
 $latest = @{
   version = $version
