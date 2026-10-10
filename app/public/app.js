@@ -98,7 +98,7 @@ function updateStatusBar() {
   $("statusLines").textContent = `${done} / ${all.length} dòng`;
   $("statusFiles").textContent = `File ${filesDone} / ${files}`;
   $("statusActive").textContent = `${active} job đang render`;
-  $("statusLabel").textContent = state.running ? (state.pausedUntil > Date.now() ? "Tạm nghỉ (AIVIE giới hạn)" : "Đang chạy") : (all.length && done === all.length ? "Hoàn tất" : "Sẵn sàng");
+  $("statusLabel").textContent = state.running ? (state.pausedUntil > Date.now() ? $("statusLabel").textContent : "Đang chạy") : (all.length && done === all.length ? "Hoàn tất" : "Sẵn sàng");
   $("statusOutput").textContent = state.outputDir ? `Output: ${state.outputDir}` : "";
 }
 
@@ -110,6 +110,7 @@ function statusPill(status, error) {
   else if (s === "Creating job") { cls = "pill-run"; label = "Đang tạo job"; }
   else if (s === "Waiting AIVIE" || s === "AIVIE queued") { cls = "pill-run"; label = "AIVIE queued"; }
   else if (s === "Rendering" || s === "AIVIE rendering" || s === "Processing") { cls = "pill-run"; label = "Đang render"; }
+  else if (s === "AIVIE finalizing") { cls = "pill-run"; label = "Chờ audio"; }
   else if (/^AIVIE /.test(s)) { cls = "pill-run"; label = s.replace("AIVIE ", ""); }
   return `<span class="pill ${cls}" title="${escapeHtml(error || s)}">${escapeHtml(label)}</span>`;
 }
@@ -555,7 +556,7 @@ async function scanBatchPath() {
 }
 
 function buildArgs(text) {
-  if ($("toolSelect").value === "create_tts_job") {
+  if (isAivieTtsTool()) {
     const voice = $("voiceId").value || $("voiceName").value;
     const modelVal = $("model").value || "eleven_v3";
     const isOwnKey = modelVal.startsWith("el_") || modelVal.startsWith("dv_");
@@ -649,8 +650,14 @@ async function connect() {
   $("toolSelect").innerHTML = state.connectedTools.map((tool) =>
     `<option value="${escapeHtml(tool.name)}">${escapeHtml(tool.name)}${tool.description ? ` - ${escapeHtml(tool.description).slice(0, 80)}` : ""}</option>`
   ).join("");
-  if (bestTool) $("toolSelect").value = bestTool;
-  setConnection("on", `Đã kết nối · ${state.connectedTools.length} tools`);
+  // Nhớ tool người dùng chọn lần trước (create_tts_job hoặc create_lines_job).
+  let savedTool = "";
+  try { savedTool = localStorage.getItem("nv.tool") || ""; } catch {}
+  const pick = state.connectedTools.some((t) => t.name === savedTool) ? savedTool : bestTool;
+  if (pick) $("toolSelect").value = pick;
+  syncToolMode(false);
+  setConnection("on", `Đã kết nối · ${data.keyCount || 1} key`);
+  if (data.quota) renderQuota(data.quota);
   log(`MCP connected. Auto chọn tool: ${bestTool || "không có tool"}.`);
 }
 
@@ -663,8 +670,9 @@ async function saveKey() {
   const data = await response.json();
   if (!response.ok || data.error) throw new Error(data.error || "Save key failed");
   $("apiKey").value = "";
-  $("keyHint").textContent = "Đã lưu key cục bộ. Lần sau restart không cần dán lại.";
-  log("Đã lưu API key cục bộ.");
+  $("keyHint").textContent = `Đã lưu ${data.keyCount || 1} key trên máy này. App tự xoay vòng khi một key hết lượt.`;
+  log(`Đã lưu ${data.keyCount || 1} API key.`);
+  refreshQuota();
 }
 
 async function clearKey() {
@@ -673,6 +681,7 @@ async function clearKey() {
   if (!response.ok || data.error) throw new Error(data.error || "Clear key failed");
   $("apiKey").value = "";
   $("keyHint").textContent = "Đã xoá key đã lưu.";
+  renderQuota({ keys: [], used: 0, total: 0, free: 0 });
   log("Đã xoá API key đã lưu.");
 }
 
@@ -708,41 +717,15 @@ async function callTool(item, index) {
     log(`AIVIE job ${started.jobId}: queued`);
     renderBatchFiles();
     renderRows();
-    // Job đã tạo thì poll tới cùng kể cả khi bấm Stop, để file vẫn được lưu.
-    for (;;) {
-      await sleep(Math.max(6000, Number(started.pollAfterSeconds || 6) * 1000));
-      let pollResponse;
-      try {
-        pollResponse = await apiFetch("/api/poll-render", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ jobId: started.jobId })
-        });
-      } catch (err) {
-        log(`Mạng chập chờn khi poll: ${err.message}, thử lại sau 3s...`);
-        await new Promise((resolve) => setTimeout(resolve, 3000));
-        continue;
-      }
-      const polled = await pollResponse.json();
-      if (!pollResponse.ok || polled.error) {
-        throw new Error(polled.error || "Poll render failed");
-      }
-      item.status = polled.status === "rendering" ? "Rendering" : `AIVIE ${polled.status}`;
-      renderBatchFiles();
-      renderRows();
-      if (polled.status === "completed") {
-        item.status = polled.saved ? "Done" : "Done (no audio)";
-        item.output = polled.saved?.filename || "";
-        item.fullPath = polled.saved?.fullPath || "";
-        log(`${fileStem(item.fileName || "")} #${index}: ${item.status}${item.output ? ` -> ${item.output}` : ""}`);
-        renderBatchFiles();
-        renderRows();
-        return;
-      }
-      if (polled.status === "failed" || polled.status === "cancelled" || polled.status === "canceled") {
-        throw new Error(`AIVIE job ${polled.status}${polled.error ? `: ${polled.error}` : ""}`);
-      }
-    }
+    // Chờ poller dùng chung báo kết quả (một request cho mọi job, tiết kiệm hạn mức API).
+    const polled = await waitForJobResult(started.jobId, item);
+    item.status = polled.saved ? "Done" : "Done (no audio)";
+    item.output = polled.saved?.filename || "";
+    item.fullPath = polled.saved?.fullPath || "";
+    log(`${fileStem(item.fileName || "")} #${index}: ${item.status}${item.output ? ` -> ${item.output}` : ""}`);
+    renderBatchFiles();
+    renderRows();
+    return;
   }
   item.status = "Processing";
   renderRows();
@@ -766,6 +749,237 @@ async function callTool(item, index) {
   renderRows();
 }
 
+
+// ---------- Hạn mức tạo job: 60 job/giờ cho mỗi key, app tự xoay key ----------
+function renderQuota(q) {
+  if (!q) return;
+  state.quota = q;
+  if ($("statusQuota")) $("statusQuota").textContent = q.total ? `Lượt tạo job ${q.used}/${q.total} giờ này` : "Lượt tạo job -";
+  if ($("keyQuota")) {
+    $("keyQuota").innerHTML = (q.keys || []).map((k) => {
+      const pct = Math.min(100, Math.round((k.used / k.limit) * 100));
+      const note = k.blockedFor > 0 ? `nghỉ ${Math.ceil(k.blockedFor / 60)} phút` : `${k.used}/${k.limit}`;
+      return `<div class="flex items-center gap-2 text-xs text-ink-3"><span class="w-14 shrink-0 font-mono">${escapeHtml(k.label)}</span><span class="h-1 flex-1 overflow-hidden rounded-full bg-raised"><span class="block h-full ${pct >= 100 ? "bg-bad" : "bg-brand"}" style="width:${pct}%"></span></span><span class="w-16 shrink-0 text-right tabular-nums">${note}</span></div>`;
+    }).join("");
+  }
+}
+async function refreshQuota() {
+  try {
+    const res = await apiFetch("/api/quota");
+    if (res.ok) renderQuota(await res.json());
+  } catch {}
+}
+setInterval(refreshQuota, 5000);
+
+// ---------- Poller dùng chung: 1 request list_jobs cho tất cả job đang chạy ----------
+const activeJobs = new Map(); // jobId -> { item, resolve, reject, since }
+let pollerTimer = null;
+const POLL_EVERY_MS = 10000;
+function waitForJobResult(jobId, item) {
+  return new Promise((resolve, reject) => {
+    activeJobs.set(jobId, { item, resolve, reject, since: Date.now() });
+    if (!pollerTimer) pollerTimer = setTimeout(pollActiveJobs, POLL_EVERY_MS);
+  });
+}
+async function pollActiveJobs() {
+  pollerTimer = null;
+  if (!activeJobs.size) return;
+  if (state.pausedUntil > Date.now()) { pollerTimer = setTimeout(pollActiveJobs, 5000); return; }
+  const ids = Array.from(activeJobs.keys());
+  try {
+    const res = await apiFetch("/api/poll-many", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jobIds: ids }) });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || "poll-many failed");
+    for (const id of ids) {
+      const entry = activeJobs.get(id); const r = data.jobs?.[id];
+      if (!entry || !r) continue;
+      if (r.status === "completed" && r.saved) { activeJobs.delete(id); entry.resolve(r); }
+      else if (r.status === "completed" && r.error) { activeJobs.delete(id); entry.reject(new Error(r.error)); }
+      else if (r.status === "failed" || r.status === "cancelled" || r.status === "canceled") { activeJobs.delete(id); entry.reject(new Error(`AIVIE job ${r.status}${r.error ? `: ${r.error}` : ""}`)); }
+      else if (r.status === "finalizing" && (entry.finalizing = (entry.finalizing || 0) + 1) > 9) {
+        // AIVIE báo completed nhưng 90 giây vẫn không có audio: dừng hỏi để không tốn hạn mức API.
+        activeJobs.delete(id);
+        entry.reject(new Error(`AIVIE báo job ${id} đã xong nhưng không trả audio. Nếu đang dùng create_lines_job, hãy đổi sang create_tts_job.`));
+      }
+      else {
+        entry.item.status = r.status === "rendering" ? "Rendering" : `AIVIE ${r.status}`;
+        if (Date.now() - entry.since > 15 * 60 * 1000) { activeJobs.delete(id); entry.reject(new Error(`AIVIE job ${id} chờ quá 15 phút, bỏ qua.`)); }
+      }
+    }
+    renderBatchFiles(); renderRows();
+  } catch (error) {
+    if (isRateLimitError(error)) applyRateLimit(error);
+    else log(`Poll lỗi: ${error.message}`);
+  }
+  if (activeJobs.size) pollerTimer = setTimeout(pollActiveJobs, POLL_EVERY_MS);
+}
+
+// AIVIE báo "Thử lại sau N giây": nghỉ đúng N giây, đếm ngược trên thanh trạng thái.
+function retryAfterSeconds(error) {
+  const m = String(error?.message || error).match(/(\d+)\s*(giây|s|sec|seconds?)/i);
+  return m ? Number(m[1]) : 60;
+}
+let pauseTicker = null;
+function applyRateLimit(error) {
+  const secs = Math.max(10, retryAfterSeconds(error));
+  const until = Date.now() + secs * 1000;
+  if (until <= state.pausedUntil) return;
+  state.pausedUntil = until;
+  log(`Hết lượt tạo job ở mọi key. Tạm nghỉ ${Math.floor(secs / 60)} phút ${secs % 60} giây rồi tự chạy tiếp. Thêm key để không phải chờ.`);
+  clearInterval(pauseTicker);
+  pauseTicker = setInterval(() => {
+    const left = Math.max(0, Math.ceil((state.pausedUntil - Date.now()) / 1000));
+    if ($("statusLabel")) $("statusLabel").textContent = left ? `Chờ lượt ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}` : (state.running ? "Đang chạy" : "Sẵn sàng");
+    if (!left) clearInterval(pauseTicker);
+  }, 1000);
+}
+
+
+// ---------- Chế độ "cả file trong 1 job" (create_lines_job) ----------
+function usingLinesTool() { return $("toolSelect")?.value === "create_lines_job"; }
+function isAivieTtsTool() { return ["create_tts_job", "create_lines_job"].includes($("toolSelect")?.value); }
+// create_lines_job luôn chạy theo kiểu "cả file trong 1 job"; create_tts_job theo ô Cách render.
+function renderMode() {
+  if (usingLinesTool()) return "file";
+  return $("renderMode")?.value === "line" ? "line" : "file";
+}
+// Đồng bộ giao diện khi đổi tool: khoá ô Cách render và ghi rõ đang chạy kiểu nào.
+function syncToolMode(announce = true) {
+  const sel = $("renderMode");
+  if (!sel) return;
+  const lines = usingLinesTool();
+  if (lines) sel.value = "file";
+  sel.disabled = lines;
+  sel.title = lines ? "create_lines_job luôn gửi cả file trong 1 job" : "";
+  if (announce && isAivieTtsTool()) {
+    log(lines
+      ? "Đã chuyển sang create_lines_job: mỗi file gửi 1 job kèm mốc thời gian từng dòng, áp dụng cho cả Batch Job và Subtitles."
+      : `Đã chuyển sang create_tts_job: ${renderMode() === "file" ? "mỗi file 1 job" : "mỗi dòng 1 job"}.`);
+  }
+}
+function parseSrtSeconds(value) {
+  const m = String(value || "").trim().match(/^(\d{2}):(\d{2}):(\d{2})[,.](\d{3})$/);
+  return m ? Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]) + Number(m[4]) / 1000 : null;
+}
+// Dòng có timing (SRT) thì giữ nguyên; dòng .txt thì ước lượng ~15 ký tự/giây, nghỉ 0.4s giữa các dòng.
+function buildTimedLines(items) {
+  let cursor = 0;
+  return items.map((item) => {
+    const text = String(item.text || "").trim();
+    const parsedStart = parseSrtSeconds(item.startTime);
+    const parsedEnd = parseSrtSeconds(item.endTime);
+    const start = parsedStart ?? cursor;
+    const end = parsedEnd ?? (start + Math.max(1.5, text.length / 15));
+    cursor = Math.max(cursor, end) + 0.4;
+    item.startTime = item.startTime || srtStamp(start);
+    item.endTime = item.endTime || srtStamp(end);
+    return { text, start: Number(start.toFixed(3)), end: Number(end.toFixed(3)) };
+  });
+}
+function srtStamp(sec) {
+  const ms = Math.round(sec * 1000);
+  const h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000), s = Math.floor((ms % 60000) / 1000), r = ms % 1000;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")},${String(r).padStart(3, "0")}`;
+}
+function parentFolderOf(outputFolder) {
+  const f = String(outputFolder || "");
+  const idx = Math.max(f.lastIndexOf("\\"), f.lastIndexOf("/"));
+  return idx > 0 ? f.slice(0, idx) : "";
+}
+
+// Render toàn bộ dòng của một file bằng MỘT create_tts_job (AIVIE nhận tới 100.000 ký tự).
+// Kết quả: <tên file>_full.mp3 ở thư mục cha + .srt căn theo thời lượng thật.
+async function renderWholeFile(items, label) {
+  const first = items[0];
+  const base = fileStem(first.fileName || first.source || "output");
+  const fullText = items.map((i) => String(i.text || "").trim()).filter(Boolean).join("\n\n");
+  if (fullText.length > 100000) throw new Error(`File quá dài (${fullText.length} ký tự, tối đa 100.000). Dùng chế độ Từng dòng.`);
+  const useLines = usingLinesTool();
+  const args = { ...buildArgs(fullText), title: base.slice(0, 120) };
+  if (useLines) { delete args.text; args.lines = buildTimedLines(items); }
+  if ($("estimateBeforeRender")?.checked) {
+    const { max_credits, ...estimateArgs } = args;
+    const estimate = await callMcpTool(useLines ? "estimate_lines" : "estimate_tts", estimateArgs);
+    const credits = Number(estimate.credits ?? estimate.aivie_credits ?? 0);
+    const maxCredits = Number($("maxCredits")?.value || 0);
+    if (maxCredits > 0 && credits > maxCredits) throw new Error(`Estimate ${credits} vượt Max credit ${maxCredits}.`);
+    log(`Estimate ${label}: ${credits || "?"} credits.`);
+  }
+  // Đổi tool thì dùng key khác, để AIVIE không trả lại job cũ của tool kia.
+  const keyName = useLines ? "linesJobKey" : "fileJobKey";
+  args.idempotency_key = first[keyName] || (first[keyName] = crypto.randomUUID());
+  for (const item of items) item.status = "Creating job";
+  renderBatchFiles(); renderRows();
+  const outputFolder = parentFolderOf(first.outputFolder) || first.outputFolder || "single-import";
+  const res = await apiFetch("/api/start-render", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ tool: useLines ? "create_lines_job" : "create_tts_job", args, outputFolder, clipNumber: `${base}_full`, fileBaseName: base })
+  });
+  const started = await res.json();
+  if (!res.ok || started.error) throw new Error(started.error || "Start render failed");
+  log(`AIVIE ${useLines ? "lines job" : "job"} ${started.jobId}: cả file ${label} (${items.length} dòng, ${fullText.length} ký tự), queued`);
+  for (const item of items) { item.status = "Waiting AIVIE"; item.jobId = started.jobId; }
+  renderBatchFiles(); renderRows();
+  const polled = await waitForJobResult(started.jobId, { set status(v) { for (const item of items) item.status = v; } });
+  for (const item of items) {
+    item.status = polled.saved ? "Done" : "Done (no audio)";
+    item.output = polled.saved?.filename || "";
+    item.fullPath = polled.saved?.fullPath || "";
+  }
+  log(`${label}: Done -> ${polled.saved?.fullPath || ""}`);
+  // SRT: chia thời lượng thật theo tỉ lệ ký tự từng dòng (dòng SRT gốc giữ timing của nó).
+  if (!useLines) assignTimingsByLength(items, Number(polled.duration) || 0);
+  try {
+    const r = await apiFetch("/api/join", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ outputFolder: first.outputFolder || "single-import", baseName: base, items: items.map((i) => ({ part: i.part, text: i.text, startTime: i.startTime, endTime: i.endTime })) })
+    });
+    const d = await r.json();
+    if (d.srt) log(`Đã tạo SRT: ${d.srtPath || d.srt}`);
+  } catch (error) { log(`Tạo SRT lỗi: ${error.message}`); }
+  renderBatchFiles(); renderRows();
+}
+
+// Nếu dòng chưa có timing: chia tổng thời lượng theo số ký tự, chừa 0.35s nghỉ giữa các dòng.
+function assignTimingsByLength(items, totalSeconds) {
+  const untimed = items.filter((i) => !parseSrtSeconds(i.startTime) && !parseSrtSeconds(i.endTime));
+  if (!untimed.length) return;
+  const gap = 0.35;
+  const chars = untimed.reduce((n, i) => n + Math.max(1, String(i.text || "").length), 0);
+  const speakable = totalSeconds > 0 ? Math.max(1, totalSeconds - gap * (untimed.length - 1)) : chars / 15;
+  let cursor = 0;
+  for (const item of untimed) {
+    const dur = (Math.max(1, String(item.text || "").length) / chars) * speakable;
+    item.startTime = srtStamp(cursor);
+    item.endTime = srtStamp(cursor + dur);
+    cursor += dur + gap;
+  }
+}
+
+// Chạy nhiều "task" (mỗi task là 1 file) song song, tôn trọng pausedUntil và delay giữa 2 lần tạo job.
+async function runFilePool(groups) {
+  let cursor = 0; let ok = 0; let failed = 0;
+  const worker = async () => {
+    while (state.running) {
+      const g = groups[cursor]; cursor += 1;
+      if (!g) return;
+      try {
+        await throttleCreate();
+        if (!state.running) return;
+        await renderWholeFile(g.items, g.label);
+        ok += 1;
+      } catch (error) {
+        for (const item of g.items) { item.status = isRateLimitError(error) ? "Queued" : "Error"; item.error = error.message; }
+        if (isRateLimitError(error)) { applyRateLimit(error); groups.push(g); }
+        else { failed += 1; log(`${g.label}: ${error.message}`); }
+        renderBatchFiles(); renderRows();
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency(), groups.length) }, worker));
+  return { ok, failed };
+}
+
 // ---------- Worker pool: chạy nhiều dòng song song ----------
 function concurrency() {
   const n = Number($("concurrency")?.value || 3);
@@ -778,8 +992,9 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 let nextCreateAt = 0;
 async function throttleCreate() {
   const delayMs = Math.max(0, Number($("callDelay")?.value || 2)) * 1000;
+  while (state.running && state.pausedUntil > Date.now()) await sleep(1000);
   const now = Date.now();
-  const at = Math.max(now, nextCreateAt, state.pausedUntil);
+  const at = Math.max(now, nextCreateAt);
   nextCreateAt = at + delayMs;
   if (at > now) await sleep(at - now);
 }
@@ -787,9 +1002,9 @@ async function throttleCreate() {
 async function runPool(queue, label) {
   const pending = queue.filter((item) => item.status === "Queued" || item.status === "Error");
   if (!pending.length) return { ok: 0, failed: 0 };
-  let cursor = 0; let ok = 0; let failed = 0; let fatal = false;
+  let cursor = 0; let ok = 0; let failed = 0; const fatal = false;
   const worker = async () => {
-    while (state.running && !fatal) {
+    while (state.running) {
       const item = pending[cursor]; cursor += 1;
       if (!item) return;
       try {
@@ -803,13 +1018,11 @@ async function runPool(queue, label) {
         failed += 1;
         log(`${label} dòng ${item.part}: ${error.message}`);
         if (isRateLimitError(error)) {
-          state.pausedUntil = Date.now() + 30000;
-          log("AIVIE báo gọi quá nhanh. Tạm nghỉ 30 giây rồi chạy tiếp.");
-          item.status = "Queued"; failed -= 1;
+          applyRateLimit(error);
+          item.status = "Queued"; item.error = ""; failed -= 1;
           pending.push(item);
-        } else if (!$("loopMode").checked) {
-          fatal = true;
         }
+        // Dòng lỗi giữ trạng thái Lỗi, các dòng khác vẫn chạy tiếp; cuối batch bấm "Chạy lại lỗi".
         renderBatchFiles(); renderRows();
       }
     }
@@ -826,8 +1039,19 @@ async function startQueue() {
   if (!queue.length) return log("Subtitles chưa có dòng nào để chạy.");
   state.running = true; state.batchMode = false;
   updateStatusBar();
-  log(`Bắt đầu ${queue.length} dòng, ${concurrency()} job song song.`);
-  const result = await runPool(queue, "Subtitles");
+  let result;
+  if (renderMode() === "file") {
+    const groups = [];
+    for (const src of [...new Set(queue.map((i) => i.source))]) {
+      const items = queue.filter((i) => i.source === src && (i.status === "Queued" || i.status === "Error"));
+      if (items.length) groups.push({ items, label: fileStem(items[0].fileName || src) });
+    }
+    log(`Bắt đầu ${groups.length} file, mỗi file 1 job (cả file), ${concurrency()} song song.`);
+    result = await runFilePool(groups);
+  } else {
+    log(`Bắt đầu ${queue.length} dòng, ${concurrency()} job song song.`);
+    result = await runPool(queue, "Subtitles");
+  }
   state.running = false;
   updateStatusBar();
   log(`Xong: ${result.ok} thành công, ${result.failed} lỗi.`);
@@ -839,6 +1063,19 @@ async function runBatchJobs() {
   if (!state.batchFiles.length) return log("Batch Job chưa có file nào.");
   state.running = true; state.batchMode = true;
   updateStatusBar();
+  if (renderMode() === "file") {
+    for (const file of state.batchFiles) normalizeSourceItems(file.source);
+    const groups = state.batchFiles.map((file) => ({
+      file, label: file.name,
+      items: state.items.filter((i) => i.source === file.source && (i.status === "Queued" || i.status === "Error"))
+    })).filter((g) => g.items.length);
+    log(`Batch: ${groups.length} file, mỗi file 1 job, ${concurrency()} file song song.`);
+    const result = await runFilePool(groups);
+    state.running = false; state.batchMode = false;
+    updateStatusBar();
+    log(result.failed ? `Batch xong, ${result.failed} file lỗi. Bấm "Chạy lại lỗi" rồi "Chạy hàng loạt".` : "Đã hoàn tất tất cả Batch Job. Full MP3 và SRT đã lưu cạnh file txt.");
+    return;
+  }
   for (const file of state.batchFiles) {
     if (!state.running) break;
     state.activeSource = file.source;
@@ -848,7 +1085,7 @@ async function runBatchJobs() {
     if (queue.every(isDone)) continue;
     log(`Batch bắt đầu: ${file.name} (${queue.length} dòng, ${concurrency()} song song)`);
     const result = await runPool(queue, file.name);
-    log(`Batch kết thúc: ${file.name} -> ${fileStatus(file.source)}`);
+    log(`Batch kết thúc: ${file.name} -> ${fileStatus(file.source)}${result.failed ? ` (${result.failed} dòng lỗi)` : ""}`);
     if ($("autoSrt").checked && queue.some(isDone)) {
       try { await joinItems(queue, true); } catch (error) { log(`Ghép ${file.name}: ${error.message}`); }
     }
@@ -856,8 +1093,10 @@ async function runBatchJobs() {
   }
   state.running = false; state.batchMode = false;
   updateStatusBar();
+  const errors = state.items.filter((item) => item.status === "Error").length;
   log(state.batchFiles.every((file) => fileStatus(file.source) === "Done")
     ? "Đã hoàn tất tất cả Batch Job. Voice, SRT và full MP3 đã lưu vào thư mục."
+    : errors ? `Batch xong nhưng có ${errors} dòng lỗi. Chọn file trong bảng Batch Job rồi bấm "Chạy lại lỗi", sau đó "Chạy hàng loạt".`
     : "Batch đã dừng. File chưa xong giữ trạng thái Chờ, bấm Chạy hàng loạt để tiếp tục.");
 }
 
@@ -869,7 +1108,7 @@ function stopAll() {
 }
 
 function retryErrors() {
-  visibleItems().forEach((item) => {
+  (state.batchFiles.length ? state.items : visibleItems()).forEach((item) => {
     if (item.status === "Error") {
       item.status = "Queued";
       item.error = "";
@@ -996,7 +1235,7 @@ function formatTime(total) {
 }
 
 function isRateLimitError(error) {
-  return /gọi quá nhanh|rate.?limit|try again after|thử lại sau/i.test(String(error?.message || error));
+  return /gọi quá nhanh|rate.?limit|rate_limited|too many|try again after|thử lại sau|429/i.test(String(error?.message || error));
 }
 
 $("connectBtn").addEventListener("click", () => connect().then(refreshBalance).catch((e) => {
@@ -1058,9 +1297,10 @@ $("showAdvanced")?.addEventListener("change", () => {
   $("advancedFields").hidden = !$("showAdvanced").checked;
 });
 $("toolSelect").addEventListener("change", () => {
-  const schema = toolHelp($("toolSelect").value);
-  if (schema) log(`Schema tool đang chọn:\n${schema}`);
+  try { localStorage.setItem("nv.tool", $("toolSelect").value); } catch {}
+  syncToolMode(true);
 });
+$("renderMode")?.addEventListener("change", () => syncToolMode(true));
 
 for (const event of ["dragenter", "dragover"]) {
   $("dropZone").addEventListener(event, (e) => {
@@ -1119,42 +1359,6 @@ async function checkForUpdate(manual = false) {
   }
 }
 
-// ---------- Tỉ lệ giao diện (zoom) ----------
-const ZOOM_STEPS = [0.85, 0.9, 1, 1.1, 1.2, 1.3, 1.45, 1.6];
-function defaultZoom() {
-  const w = window.screen?.width || 1920;
-  if (w >= 3200) return 1.45;
-  if (w >= 2400) return 1.2;
-  if (w >= 1900) return 1.05;
-  return 1;
-}
-function applyZoom(value) {
-  const z = Math.min(1.6, Math.max(0.85, Number(value) || 1));
-  document.documentElement.style.zoom = String(z);
-  if ($("zoomValue")) $("zoomValue").textContent = `${Math.round(z * 100)}%`;
-  try { localStorage.setItem("nv.zoom", String(z)); } catch {}
-  return z;
-}
-function stepZoom(dir) {
-  const current = Number(document.documentElement.style.zoom || 1);
-  const idx = ZOOM_STEPS.findIndex((v) => Math.abs(v - current) < 0.01);
-  const next = dir === 0 ? defaultZoom() : ZOOM_STEPS[Math.min(ZOOM_STEPS.length - 1, Math.max(0, (idx < 0 ? 2 : idx) + dir))];
-  applyZoom(next);
-}
-(() => {
-  let saved = null;
-  try { saved = localStorage.getItem("nv.zoom"); } catch {}
-  applyZoom(saved ? Number(saved) : defaultZoom());
-  $("zoomInBtn")?.addEventListener("click", () => stepZoom(1));
-  $("zoomOutBtn")?.addEventListener("click", () => stepZoom(-1));
-  document.addEventListener("keydown", (e) => {
-    if (!(e.ctrlKey || e.metaKey)) return;
-    if (e.key === "=" || e.key === "+") { e.preventDefault(); stepZoom(1); }
-    else if (e.key === "-") { e.preventDefault(); stepZoom(-1); }
-    else if (e.key === "0") { e.preventDefault(); stepZoom(0); }
-  });
-})();
-
 async function bootConnection() {
   if ($("advancedFields")) $("advancedFields").hidden = true;
   setConnection("off", "Chưa kết nối");
@@ -1173,7 +1377,7 @@ async function bootConnection() {
         $("keyHint").textContent = `Đang kết nối backend/API (lần ${attempt}/8)...`;
         await connect();
         await refreshBalance();
-        $("keyHint").textContent = "Đã dùng key lưu trên máy. Dán key mới và bấm Lưu key nếu muốn đổi.";
+        $("keyHint").textContent = `Đang dùng ${data.keyCount || 1} key lưu trên máy. Dán danh sách key mới rồi bấm Lưu key để thay.`;
         log("Tự động kết nối API thành công!");
         return;
       }

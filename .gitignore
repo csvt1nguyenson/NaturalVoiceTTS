@@ -21,3 +21,6 @@ desktop-tauri/src-tauri/resources/ffmpeg.exe
 desktop-demo/
 native-egui/
 native-slint/
+
+# Ghi chú bàn giao nội bộ
+HANDOFF.md

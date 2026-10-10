@@ -19,7 +19,10 @@ const DRIVE_ALIASES: &[(&str, &str)] = &[
 #[derive(Clone)]
 struct McpSession {
     url: String,
+    /// Key chính, dùng cho mọi lệnh không tạo job (list, get_job, link…).
     api_key: String,
+    /// Toàn bộ key để xoay vòng khi tạo job. AIVIE giới hạn 60 job/giờ cho MỖI key.
+    keys: Vec<String>,
     protocol_version: String,
     tools: Vec<Value>,
     selected_tool: String,
@@ -31,8 +34,17 @@ struct RenderJob {
     full_path: PathBuf,
 }
 
+/// Lượt tạo job đã dùng của từng key (theo đuôi key), tính trong 1 giờ trượt.
+#[derive(Default)]
+struct Quota {
+    used: HashMap<String, Vec<u64>>,
+    blocked: HashMap<String, u64>,
+}
+const JOBS_PER_HOUR: usize = 60;
+
 pub struct Backend {
     session: Mutex<McpSession>,
+    quota: Mutex<Quota>,
     render_jobs: Mutex<HashMap<String, RenderJob>>,
     logs: Mutex<Vec<String>>,
     pub data_dir: PathBuf,
@@ -76,11 +88,13 @@ impl Backend {
         let mut session = McpSession {
             url: DEFAULT_MCP_URL.into(),
             api_key: String::new(),
+            keys: vec![],
             protocol_version: "2024-11-05".into(),
             tools: vec![],
             selected_tool: String::new(),
             initialized: false,
         };
+        let mut quota = Quota::default();
         if let Ok(text) = std::fs::read_to_string(data_dir.join("local-config.json")) {
             if let Ok(cfg) = serde_json::from_str::<Value>(&text) {
                 if let Some(u) = cfg.get("mcpUrl").and_then(Value::as_str) {
@@ -88,6 +102,26 @@ impl Backend {
                 }
                 if let Some(k) = cfg.get("apiKey").and_then(Value::as_str) {
                     session.api_key = k.into();
+                }
+                if let Some(arr) = cfg.get("apiKeys").and_then(Value::as_array) {
+                    session.keys = arr.iter().filter_map(Value::as_str).filter(|k| !k.is_empty()).map(String::from).collect();
+                }
+                if session.keys.is_empty() && !session.api_key.is_empty() {
+                    session.keys = vec![session.api_key.clone()];
+                }
+                if let Some(first) = session.keys.first() {
+                    session.api_key = first.clone();
+                }
+                if let Some(obj) = cfg.get("usage").and_then(Value::as_object) {
+                    for (k, v) in obj {
+                        let ts: Vec<u64> = v.as_array().map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default();
+                        quota.used.insert(k.clone(), ts);
+                    }
+                }
+                if let Some(obj) = cfg.get("blocked").and_then(Value::as_object) {
+                    for (k, v) in obj {
+                        if let Some(t) = v.as_u64() { quota.blocked.insert(k.clone(), t); }
+                    }
                 }
             }
         }
@@ -97,6 +131,7 @@ impl Backend {
             .expect("reqwest client");
         Self {
             session: Mutex::new(session),
+            quota: Mutex::new(quota),
             render_jobs: Mutex::new(HashMap::new()),
             logs: Mutex::new(vec![]),
             data_dir,
@@ -121,17 +156,24 @@ impl Backend {
 
     fn save_config(&self) -> Result<(), String> {
         let s = self.session.lock().unwrap().clone();
-        let v = json!({ "mcpUrl": s.url, "apiKey": s.api_key });
+        let (used, blocked) = {
+            let q = self.quota.lock().unwrap();
+            (json!(q.used), json!(q.blocked))
+        };
+        let v = json!({ "mcpUrl": s.url, "apiKey": s.api_key, "apiKeys": s.keys, "usage": used, "blocked": blocked });
         std::fs::write(self.config_path(), serde_json::to_string_pretty(&v).unwrap()).map_err(|e| e.to_string())
     }
 
     // ---------- MCP ----------
 
     async fn mcp_request(&self, method: &str, params: Value) -> ApiResult {
-        let (url, key) = {
-            let s = self.session.lock().unwrap();
-            (s.url.clone(), s.api_key.clone())
-        };
+        let key = self.session.lock().unwrap().api_key.clone();
+        self.mcp_request_key(&key, method, params).await
+    }
+
+    async fn mcp_request_key(&self, key: &str, method: &str, params: Value) -> ApiResult {
+        let url = self.session.lock().unwrap().url.clone();
+        let key = key.to_string();
         let payload = json!({
             "jsonrpc": "2.0",
             "id": format!("{}-{}", now_ms(), rand_suffix()),
@@ -182,7 +224,108 @@ impl Backend {
     }
 
     async fn call_tool(&self, name: &str, args: Value) -> ApiResult {
+        if name.starts_with("create_") {
+            return self.create_with_rotation(name, args).await;
+        }
         self.mcp_request("tools/call", json!({ "name": name, "arguments": args })).await
+    }
+
+    // ---------- Xoay vòng key + đếm hạn mức 60 job/giờ mỗi key ----------
+
+    /// Chọn key còn lượt và giữ chỗ luôn (để nhiều job song song không cùng lấy lượt cuối).
+    /// Hết lượt ở mọi key thì trả về số giây cần chờ.
+    fn reserve_key(&self) -> Result<String, u64> {
+        let keys = self.session.lock().unwrap().keys.clone();
+        let now = now_s();
+        let mut q = self.quota.lock().unwrap();
+        let mut wait = u64::MAX;
+        for key in &keys {
+            let label = key_label(key);
+            let blocked_until = q.blocked.get(&label).copied().unwrap_or(0);
+            let used = q.used.entry(label.clone()).or_default();
+            used.retain(|t| now.saturating_sub(*t) < 3600);
+            if blocked_until > now {
+                wait = wait.min(blocked_until - now);
+                continue;
+            }
+            if used.len() < JOBS_PER_HOUR {
+                used.push(now);
+                return Ok(key.clone());
+            }
+            let oldest = used.iter().min().copied().unwrap_or(now);
+            wait = wait.min((oldest + 3600).saturating_sub(now));
+        }
+        Err(if wait == u64::MAX { 60 } else { wait + 1 })
+    }
+
+    fn release_key(&self, key: &str) {
+        let mut q = self.quota.lock().unwrap();
+        if let Some(v) = q.used.get_mut(&key_label(key)) {
+            v.pop();
+        }
+    }
+
+    fn block_key(&self, key: &str, secs: u64) {
+        let mut q = self.quota.lock().unwrap();
+        q.blocked.insert(key_label(key), now_s() + secs.clamp(10, 3600));
+    }
+
+    async fn create_with_rotation(&self, name: &str, args: Value) -> ApiResult {
+        if self.session.lock().unwrap().keys.is_empty() {
+            return Err("Chưa có API key. Hãy dán key và bấm Lưu key.".into());
+        }
+        loop {
+            let key = match self.reserve_key() {
+                Ok(k) => k,
+                Err(wait) => {
+                    let _ = self.save_config();
+                    return Err(format!("Mọi API key đã hết lượt tạo job trong giờ này. Thử lại sau {wait} giây."));
+                }
+            };
+            match self.mcp_request_key(&key, "tools/call", json!({ "name": name, "arguments": args.clone() })).await {
+                Ok(v) => {
+                    let _ = self.save_config();
+                    return Ok(v);
+                }
+                Err(e) if is_rate_limit(&e) => {
+                    // AIVIE đếm cả job tạo từ nơi khác bằng key này: khoá key theo thời gian họ báo, thử key kế tiếp.
+                    self.release_key(&key);
+                    let secs = parse_retry_secs(&e).unwrap_or(3600);
+                    self.block_key(&key, secs);
+                    self.log(format!("Key {} hết lượt (AIVIE báo chờ {secs} giây), chuyển key khác.", key_label(&key)));
+                }
+                Err(e) if e.contains("HTTP 401") => {
+                    // Key sai hoặc đã thu hồi: bỏ qua key này 1 giờ, dùng key khác.
+                    self.release_key(&key);
+                    self.block_key(&key, 3600);
+                    self.log(format!("Key {} không hợp lệ hoặc đã thu hồi, bỏ qua.", key_label(&key)));
+                }
+                Err(e) => {
+                    self.release_key(&key);
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    fn quota_json(&self) -> Value {
+        let keys = self.session.lock().unwrap().keys.clone();
+        let now = now_s();
+        let mut q = self.quota.lock().unwrap();
+        let mut list = vec![];
+        let mut used_total = 0usize;
+        let mut free_total = 0usize;
+        for key in &keys {
+            let label = key_label(key);
+            let blocked_for = q.blocked.get(&label).copied().unwrap_or(0).saturating_sub(now);
+            let used = q.used.entry(label.clone()).or_default();
+            used.retain(|t| now.saturating_sub(*t) < 3600);
+            let n = if blocked_for > 0 { JOBS_PER_HOUR } else { used.len() };
+            used_total += n;
+            free_total += JOBS_PER_HOUR - n.min(JOBS_PER_HOUR);
+            list.push(json!({ "label": label, "used": n, "limit": JOBS_PER_HOUR, "blockedFor": blocked_for }));
+        }
+        json!({ "keys": list, "keyCount": keys.len(), "used": used_total, "total": keys.len() * JOBS_PER_HOUR, "free": free_total })
     }
 
     async fn initialize(&self, url: Option<String>, api_key: Option<String>) -> ApiResult {
@@ -192,7 +335,11 @@ impl Backend {
                 s.url = u;
             }
             if let Some(k) = api_key.filter(|k| !k.trim().is_empty()) {
-                s.api_key = normalize_api_key(&k);
+                let keys = parse_keys(&k);
+                if let Some(first) = keys.first() {
+                    s.api_key = first.clone();
+                    s.keys = keys;
+                }
             }
             s.initialized = false;
             s.tools.clear();
@@ -220,7 +367,8 @@ impl Backend {
             url_out = s.url.clone();
         }
         self.save_config()?;
-        Ok(json!({ "init": init, "tools": tools, "selectedTool": selected, "url": url_out }))
+        let quota = self.quota_json();
+        Ok(json!({ "init": init, "tools": tools, "selectedTool": selected, "url": url_out, "keyCount": quota["keyCount"], "quota": quota }))
     }
 
     async fn resolve_voice_id(&self, voice: &str) -> Result<String, String> {
@@ -333,7 +481,9 @@ impl Backend {
 
     async fn start_render(&self, body: &Value) -> ApiResult {
         let (args, full_path, filename) = self.prepare_tts(body).await?;
-        let result = self.call_tool("create_tts_job", args).await?;
+        // tool: create_tts_job (từng dòng) hoặc create_lines_job (cả file trong 1 job).
+        let tool = body.get("tool").and_then(Value::as_str).filter(|t| *t == "create_lines_job").unwrap_or("create_tts_job");
+        let result = self.call_tool(tool, args).await?;
         let job_id = find_job_id(&result).ok_or("AIVIE không trả job_id.")?;
         self.render_jobs.lock().unwrap().insert(job_id.clone(), RenderJob { filename: filename.clone(), full_path });
         Ok(json!({ "jobId": job_id, "status": "queued", "filename": filename, "result": result }))
@@ -368,6 +518,64 @@ impl Backend {
         }
         let after = data.get("poll_after_seconds").cloned().unwrap_or(json!(3));
         Ok(json!({ "status": status, "job": data, "pollAfterSeconds": after }))
+    }
+
+    /// Hỏi trạng thái nhiều job bằng MỘT lần gọi list_jobs, để tiết kiệm hạn mức API.
+    async fn poll_many(&self, ids: &[String]) -> ApiResult {
+        if ids.is_empty() {
+            return Ok(json!({ "jobs": {} }));
+        }
+        let listed = self.call_tool("list_jobs", json!({ "limit": 20 })).await?;
+        let data = content_json(&listed);
+        let arr = data.get("jobs").or(data.get("items")).and_then(Value::as_array).cloned()
+            .or_else(|| data.as_array().cloned()).unwrap_or_default();
+        let mut out = serde_json::Map::new();
+        for id in ids {
+            let found = arr.iter().find(|j| {
+                j.get("job_id").or(j.get("id")).and_then(Value::as_str) == Some(id.as_str())
+            }).cloned();
+            let job = match found {
+                Some(j) => j,
+                None => {
+                    // Job cũ không còn trong 50 job gần nhất: hỏi riêng.
+                    match self.call_tool("get_job", json!({ "job_id": id })).await {
+                        Ok(r) => content_json(&r),
+                        Err(e) => { out.insert(id.clone(), json!({ "status": "unknown", "error": e })); continue; }
+                    }
+                }
+            };
+            let status = job_status(&job);
+            if status == "completed" {
+                let local = {
+                    let jobs = self.render_jobs.lock().unwrap();
+                    jobs.get(id).map(|j| (j.filename.clone(), j.full_path.clone()))
+                };
+                match local {
+                    Some((filename, full_path)) => {
+                        if !full_path.exists() {
+                            if let Err(e) = self.download_job_audio(id, &full_path).await {
+                                // AIVIE báo completed nhưng audio chưa lên CDN: chờ tiếp ở lượt poll sau.
+                                if e.contains("chưa sẵn sàng") || e.contains("not_ready") || e.contains("HTTP 404") {
+                                    out.insert(id.clone(), json!({ "status": "finalizing" }));
+                                } else {
+                                    out.insert(id.clone(), json!({ "status": "completed", "error": e }));
+                                }
+                                continue;
+                            }
+                        }
+                        let duration = job.get("duration_seconds").cloned().unwrap_or(Value::Null);
+                        out.insert(id.clone(), json!({ "status": "completed", "duration": duration, "saved": { "filename": filename, "fullPath": full_path, "jobId": id } }));
+                    }
+                    None => { out.insert(id.clone(), json!({ "status": "completed", "error": "Không tìm thấy local render job." })); }
+                }
+            } else if matches!(status.as_str(), "failed" | "cancelled" | "canceled") {
+                let err = job.get("error").or(job.get("message")).and_then(Value::as_str).map(String::from).unwrap_or_else(|| format!("AIVIE job {status}"));
+                out.insert(id.clone(), json!({ "status": status, "error": err }));
+            } else {
+                out.insert(id.clone(), json!({ "status": status }));
+            }
+        }
+        Ok(json!({ "jobs": out }))
     }
 
     // ---------- Paths ----------
@@ -488,32 +696,41 @@ impl Backend {
                 let slice: Vec<&String> = logs.iter().skip(since).collect();
                 Ok(json!({ "logs": slice, "total": logs.len() }))
             }
+            "/api/quota" => Ok(self.quota_json()),
             "/api/status" => {
+                let quota = self.quota_json();
                 let s = self.session.lock().unwrap();
                 Ok(json!({
                     "url": s.url, "connected": s.initialized, "tools": s.tools,
+                    "keyCount": s.keys.len(), "quota": quota,
                     "selectedTool": s.selected_tool, "hasSavedApiKey": !s.api_key.is_empty(),
                     "outputDir": self.output_dir, "dataDir": self.data_dir, "ffmpeg": self.ffmpeg
                 }))
             }
             "/api/connect" => self.initialize(s("url"), s("apiKey")).await,
             "/api/save-key" => {
-                let key = normalize_api_key(&s("apiKey").unwrap_or_default());
-                if key.is_empty() {
+                let keys = parse_keys(&s("apiKey").unwrap_or_default());
+                if keys.is_empty() {
                     return Err("API key trống.".into());
                 }
+                let count = keys.len();
                 {
                     let mut sess = self.session.lock().unwrap();
                     if let Some(u) = s("url").filter(|u| !u.is_empty()) {
                         sess.url = u;
                     }
-                    sess.api_key = key;
+                    sess.api_key = keys[0].clone();
+                    sess.keys = keys;
                 }
                 self.save_config()?;
-                Ok(json!({ "ok": true, "hasSavedApiKey": true }))
+                Ok(json!({ "ok": true, "hasSavedApiKey": true, "keyCount": count }))
             }
             "/api/clear-key" => {
-                self.session.lock().unwrap().api_key.clear();
+                {
+                    let mut sess = self.session.lock().unwrap();
+                    sess.api_key.clear();
+                    sess.keys.clear();
+                }
                 let _ = std::fs::remove_file(self.config_path());
                 Ok(json!({ "ok": true, "hasSavedApiKey": false }))
             }
@@ -579,6 +796,11 @@ impl Backend {
                 self.start_render(&body).await
             }
             "/api/poll-render" => self.poll_render(&s("jobId").ok_or("Thiếu jobId.")?).await,
+            "/api/poll-many" => {
+                let ids: Vec<String> = body.get("jobIds").and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect()).unwrap_or_default();
+                self.poll_many(&ids).await
+            }
             "/api/save-text" => {
                 let name = safe_name(&s("filename").unwrap_or_default()).trim_end_matches('.').to_string();
                 let name = if name.is_empty() { "output.txt".to_string() } else { name };
@@ -638,6 +860,47 @@ fn run_hidden(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
     cmd
+}
+
+fn now_s() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Nhãn ngắn của key để hiển thị và lưu lượt dùng, không lộ cả key.
+fn key_label(key: &str) -> String {
+    let chars: Vec<char> = key.chars().collect();
+    let tail: String = chars[chars.len().saturating_sub(5)..].iter().collect();
+    format!("…{tail}")
+}
+
+/// Tách nhiều key từ nội dung dán vào (mỗi dòng một key, hoặc lẫn trong lệnh/JSON).
+pub fn parse_keys(raw: &str) -> Vec<String> {
+    let re = Regex::new(r"aiv_[A-Za-z0-9_\-]{10,}").unwrap();
+    let mut out: Vec<String> = vec![];
+    for m in re.find_iter(raw) {
+        let k = m.as_str().to_string();
+        if !out.contains(&k) {
+            out.push(k);
+        }
+    }
+    if out.is_empty() {
+        let single = normalize_api_key(raw);
+        if !single.is_empty() {
+            out.push(single);
+        }
+    }
+    out.truncate(10);
+    out
+}
+
+fn is_rate_limit(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    m.contains("quá nhanh") || m.contains("rate_limited") || m.contains("rate limit") || m.contains("http 429")
+}
+
+fn parse_retry_secs(msg: &str) -> Option<u64> {
+    let re = Regex::new(r"(\d+)\s*(giây|seconds?|sec|s)").unwrap();
+    re.captures(msg).and_then(|c| c[1].parse().ok())
 }
 
 fn chrono_time() -> String {

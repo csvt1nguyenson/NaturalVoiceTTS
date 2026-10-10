@@ -69,6 +69,69 @@ async function saveLocalConfig(config) {
 }
 
 
+// ---------- Nhiều key + hạn mức 60 job/giờ mỗi key ----------
+const JOBS_PER_HOUR = 60;
+const quota = { used: {}, blocked: {} };
+const nowS = () => Math.floor(Date.now() / 1000);
+const keyLabel = (key) => `…${String(key).slice(-5)}`;
+function parseKeys(raw) {
+  const found = [...new Set(String(raw || "").match(/aiv_[A-Za-z0-9_\-]{10,}/g) || [])];
+  if (!found.length) { const single = normalizeApiKey(raw); if (single) found.push(single); }
+  return found.slice(0, 10);
+}
+function reserveKey() {
+  const now = nowS(); let wait = Infinity;
+  for (const key of mcpSession.keys || []) {
+    const label = keyLabel(key);
+    const used = (quota.used[label] = (quota.used[label] || []).filter((t) => now - t < 3600));
+    const blockedUntil = quota.blocked[label] || 0;
+    if (blockedUntil > now) { wait = Math.min(wait, blockedUntil - now); continue; }
+    if (used.length < JOBS_PER_HOUR) { used.push(now); return { key }; }
+    wait = Math.min(wait, Math.min(...used) + 3600 - now);
+  }
+  return { wait: Number.isFinite(wait) ? wait + 1 : 60 };
+}
+function quotaJson() {
+  const now = nowS(); let usedTotal = 0; let free = 0;
+  const keys = (mcpSession.keys || []).map((key) => {
+    const label = keyLabel(key);
+    const used = (quota.used[label] = (quota.used[label] || []).filter((t) => now - t < 3600));
+    const blockedFor = Math.max(0, (quota.blocked[label] || 0) - now);
+    const n = blockedFor > 0 ? JOBS_PER_HOUR : used.length;
+    usedTotal += n; free += JOBS_PER_HOUR - n;
+    return { label, used: n, limit: JOBS_PER_HOUR, blockedFor };
+  });
+  return { keys, keyCount: keys.length, used: usedTotal, total: keys.length * JOBS_PER_HOUR, free };
+}
+const isRateLimit = (msg) => /quá nhanh|rate_limited|rate limit|HTTP 429/i.test(String(msg));
+async function persistConfig() {
+  await saveLocalConfig({ mcpUrl: mcpSession.url, apiKey: mcpSession.apiKey, apiKeys: mcpSession.keys || [], usage: quota.used, blocked: quota.blocked });
+}
+async function createWithRotation(params) {
+  if (!(mcpSession.keys || []).length) throw new Error("Chưa có API key. Hãy dán key và bấm Lưu key.");
+  for (;;) {
+    const pick = reserveKey();
+    if (!pick.key) { await persistConfig(); throw new Error(`Mọi API key đã hết lượt tạo job trong giờ này. Thử lại sau ${pick.wait} giây.`); }
+    try {
+      const result = await mcpRequest("tools/call", params, pick.key);
+      await persistConfig();
+      return result;
+    } catch (error) {
+      quota.used[keyLabel(pick.key)]?.pop();
+      if (/HTTP 401/.test(error.message)) {
+        quota.blocked[keyLabel(pick.key)] = nowS() + 3600;
+        addServerLog(`Key ${keyLabel(pick.key)} không hợp lệ hoặc đã thu hồi, bỏ qua.`);
+        continue;
+      }
+      if (!isRateLimit(error.message)) throw error;
+      const m = String(error.message).match(/(\d+)\s*(giây|seconds?|sec|s)/);
+      const secs = Math.min(3600, Math.max(10, m ? Number(m[1]) : 3600));
+      quota.blocked[keyLabel(pick.key)] = nowS() + secs;
+      addServerLog(`Key ${keyLabel(pick.key)} hết lượt (AIVIE báo chờ ${secs} giây), chuyển key khác.`);
+    }
+  }
+}
+
 function normalizeApiKey(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
@@ -104,14 +167,14 @@ async function readJson(req) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
-function mcpHeaders(extra = {}) {
+function mcpHeaders(extra = {}, key = mcpSession.apiKey) {
   const headers = {
     "content-type": "application/json",
     "accept": "application/json, text/event-stream",
     ...extra
   };
-  if (mcpSession.apiKey) {
-    headers.authorization = `Bearer ${mcpSession.apiKey}`;
+  if (key) {
+    headers.authorization = `Bearer ${key}`;
   }
   return headers;
 }
@@ -134,7 +197,11 @@ async function parseMcpResponse(response) {
   return text ? JSON.parse(text) : {};
 }
 
-async function mcpRequest(method, params = {}) {
+async function mcpRequest(method, params = {}, keyOverride = "") {
+  // Mọi lệnh tạo job đi qua bộ xoay key.
+  if (!keyOverride && method === "tools/call" && String(params?.name || "").startsWith("create_")) {
+    return createWithRotation(params);
+  }
   const payload = {
     jsonrpc: "2.0",
     id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -143,7 +210,7 @@ async function mcpRequest(method, params = {}) {
   };
   const response = await fetch(mcpSession.url, {
     method: "POST",
-    headers: mcpHeaders(),
+    headers: mcpHeaders({}, keyOverride || mcpSession.apiKey),
     body: JSON.stringify(payload)
   });
   const body = await parseMcpResponse(response);
@@ -171,7 +238,9 @@ function contentJson(result) {
 }
 
 async function initializeMcp({ url, apiKey }) {
-  const normalizedKey = apiKey ? normalizeApiKey(apiKey) : mcpSession.apiKey;
+  const newKeys = apiKey ? parseKeys(apiKey) : [];
+  if (newKeys.length) mcpSession.keys = newKeys;
+  const normalizedKey = newKeys[0] || mcpSession.apiKey;
   mcpSession = {
     ...mcpSession,
     url: url || mcpSession.url || defaultMcpUrl,
@@ -190,8 +259,8 @@ async function initializeMcp({ url, apiKey }) {
   const listed = await mcpRequest("tools/list", {});
   mcpSession.tools = listed.tools || [];
   mcpSession.selectedTool = pickDefaultTool(mcpSession.tools);
-  await saveLocalConfig({ mcpUrl: mcpSession.url, apiKey: mcpSession.apiKey });
-  return { init, tools: mcpSession.tools, selectedTool: mcpSession.selectedTool, url: mcpSession.url };
+  await persistConfig();
+  return { init, tools: mcpSession.tools, selectedTool: mcpSession.selectedTool, url: mcpSession.url, keyCount: (mcpSession.keys || []).length, quota: quotaJson() };
 }
 
 function pickDefaultTool(tools) {
@@ -322,7 +391,7 @@ async function renderAivieTts({ args, outputFolder, clipNumber, fileBaseName }) 
   };
 }
 
-async function startAivieRender({ args, outputFolder, clipNumber, fileBaseName }) {
+async function startAivieRender({ args, outputFolder, clipNumber, fileBaseName, tool }) {
   const targetDir = resolveTargetDirectory(outputFolder || "single-import");
   const filename = `${safeName(clipNumber || fileBaseName || "1")}.mp3`;
   const fullPath = path.join(targetDir, filename);
@@ -340,7 +409,7 @@ async function startAivieRender({ args, outputFolder, clipNumber, fileBaseName }
     }
   }
   const result = await mcpRequest("tools/call", {
-    name: "create_tts_job",
+    name: tool === "create_lines_job" ? "create_lines_job" : "create_tts_job",
     arguments: normalized
   });
   const jobId = findJobId(result);
@@ -548,6 +617,9 @@ const server = createServer(async (req, res) => {
       const since = Number(url.searchParams.get("since") || 0);
       return json(res, 200, { logs: serverLogs.slice(since), total: serverLogs.length });
     }
+    if (req.method === "GET" && url.pathname === "/api/quota") {
+      return json(res, 200, quotaJson());
+    }
     if (req.method === "GET" && url.pathname === "/api/status") {
       return json(res, 200, {
         url: mcpSession.url,
@@ -555,6 +627,8 @@ const server = createServer(async (req, res) => {
         tools: mcpSession.tools,
         selectedTool: mcpSession.selectedTool,
         hasSavedApiKey: Boolean(mcpSession.apiKey),
+        keyCount: (mcpSession.keys || []).length,
+        quota: quotaJson(),
         outputDir
       });
     }
@@ -563,15 +637,17 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === "POST" && url.pathname === "/api/save-key") {
       const { url: mcpUrl, apiKey } = await readJson(req);
-      const normalizedKey = normalizeApiKey(apiKey);
-      if (!normalizedKey) throw new Error("API key trống.");
+      const keys = parseKeys(apiKey);
+      if (!keys.length) throw new Error("API key trống.");
       mcpSession.url = mcpUrl || mcpSession.url || defaultMcpUrl;
-      mcpSession.apiKey = normalizedKey;
-      await saveLocalConfig({ mcpUrl: mcpSession.url, apiKey: mcpSession.apiKey });
-      return json(res, 200, { ok: true, hasSavedApiKey: true });
+      mcpSession.keys = keys;
+      mcpSession.apiKey = keys[0];
+      await persistConfig();
+      return json(res, 200, { ok: true, hasSavedApiKey: true, keyCount: keys.length });
     }
     if (req.method === "POST" && url.pathname === "/api/clear-key") {
       mcpSession.apiKey = "";
+      mcpSession.keys = [];
       try { await unlink(configPath); } catch {}
       return json(res, 200, { ok: true, hasSavedApiKey: false });
     }
@@ -659,6 +735,36 @@ const server = createServer(async (req, res) => {
       if (!jobId) throw new Error("Thiếu jobId.");
       return json(res, 200, await pollAivieRender(jobId));
     }
+    if (req.method === "POST" && url.pathname === "/api/poll-many") {
+      const { jobIds } = await readJson(req);
+      const ids = Array.isArray(jobIds) ? jobIds : [];
+      const out = {};
+      if (ids.length) {
+        const listed = contentJson(await mcpRequest("tools/call", { name: "list_jobs", arguments: { limit: 20 } }));
+        const arr = listed.jobs || listed.items || (Array.isArray(listed) ? listed : []);
+        for (const id of ids) {
+          let job = arr.find((j) => (j.job_id || j.id) === id);
+          if (!job) {
+            try { job = contentJson(await mcpRequest("tools/call", { name: "get_job", arguments: { job_id: id } })); }
+            catch (e) { out[id] = { status: "unknown", error: e.message }; continue; }
+          }
+          const status = job.status || job.job?.status || "unknown";
+          if (status === "completed") {
+            const local = renderJobs.get(id);
+            if (!local) { out[id] = { status, error: "Không tìm thấy local render job." }; continue; }
+            try {
+              if (!existsSync(local.fullPath)) await downloadJobAudio(id, local.fullPath);
+              out[id] = { status, duration: job.duration_seconds ?? null, saved: { filename: local.filename, fullPath: local.fullPath, jobId: id } };
+            } catch (e) {
+              out[id] = /chưa sẵn sàng|not_ready|HTTP 404/.test(e.message) ? { status: "finalizing" } : { status, error: e.message };
+            }
+          } else if (status === "failed" || status === "cancelled" || status === "canceled") {
+            out[id] = { status, error: job.error || job.message || `AIVIE job ${status}` };
+          } else out[id] = { status };
+        }
+      }
+      return json(res, 200, { jobs: out });
+    }
     if (req.method === "POST" && url.pathname === "/api/save-text") {
       const { filename, text } = await readJson(req);
       const safe = safeName(filename).replace(/\.+$/, "") || "output.txt";
@@ -710,6 +816,10 @@ async function main() {
   const localConfig = await loadLocalConfig();
   if (localConfig.mcpUrl) mcpSession.url = localConfig.mcpUrl;
   if (localConfig.apiKey) mcpSession.apiKey = localConfig.apiKey;
+  mcpSession.keys = Array.isArray(localConfig.apiKeys) && localConfig.apiKeys.length ? localConfig.apiKeys : (mcpSession.apiKey ? [mcpSession.apiKey] : []);
+  if (mcpSession.keys[0]) mcpSession.apiKey = mcpSession.keys[0];
+  Object.assign(quota.used, localConfig.usage || {});
+  Object.assign(quota.blocked, localConfig.blocked || {});
   // Desktop: tự thoát khi tiến trình cha (Tauri) không còn, kể cả khi bị kill cứng.
   const parentPid = Number(cliArgs["parent-pid"] || 0);
   if (parentPid > 0) {

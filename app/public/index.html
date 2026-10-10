@@ -35,7 +35,7 @@
             <h2>AIVIE API</h2>
             <div class="space-y-2.5">
               <label class="field"><span>Endpoint</span><input id="mcpUrl" class="input" value="https://app.aivie.pro/api/v1/mcp" /></label>
-              <label class="field"><span>API key</span><input id="apiKey" class="input" type="password" placeholder="Dán key, Bearer, JSON MCP hoặc lệnh Claude" /></label>
+              <label class="field"><span>API key · mỗi dòng một key, tối đa 10</span><textarea id="apiKey" rows="3" class="input h-auto resize-none py-1.5 font-mono text-xs" style="-webkit-text-security: disc" spellcheck="false" placeholder="aiv_…&#10;aiv_…"></textarea></label>
               <div class="flex gap-1.5">
                 <button id="connectBtn" class="btn btn-primary flex-1 justify-center">Kết nối</button>
                 <button id="saveKeyBtn" class="btn">Lưu key</button>
@@ -47,6 +47,7 @@
                 <button id="jobsBtn" class="btn btn-sm">Jobs</button>
               </div>
               <p id="keyHint" class="text-xs text-ink-3">Key lưu trên máy này, không gửi đi đâu khác.</p>
+              <div id="keyQuota" class="space-y-1"></div>
             </div>
           </section>
 
@@ -145,6 +146,12 @@
           <section class="side-section border-b-0">
             <h2>Tuỳ chọn chạy</h2>
             <div class="space-y-2">
+              <label class="field"><span>Cách render</span>
+                <select id="renderMode" class="input">
+                  <option value="line" selected>Từng dòng → clip lẻ 1.mp3, 2.mp3… + full MP3 + SRT</option>
+                  <option value="file">Cả file trong 1 job → chỉ full MP3 + SRT</option>
+                </select>
+              </label>
               <label class="check"><input id="autoSrt" type="checkbox" checked /> Tự tạo SRT và ghép full MP3</label>
               <label class="check"><input id="loopMode" type="checkbox" /> Tự chạy lại khi lỗi</label>
               <label class="check"><input id="autoSplit" type="checkbox" /> Tự tách câu file lẻ</label>
@@ -263,12 +270,9 @@
         <span id="statusFiles">File 0 / 0</span>
         <span class="text-ink-3">·</span>
         <span id="statusActive">0 job đang render</span>
+        <span class="text-ink-3">·</span>
+        <span id="statusQuota" title="AIVIE cho mỗi key tạo 60 job mỗi giờ">Lượt tạo job -</span>
         <span id="statusOutput" class="ml-auto truncate text-ink-3"></span>
-        <span class="flex shrink-0 items-center gap-1 border-l border-line pl-3" title="Cỡ chữ (Ctrl + / Ctrl − / Ctrl 0)">
-          <button id="zoomOutBtn" class="btn btn-sm h-5 px-1.5">A−</button>
-          <span id="zoomValue" class="w-10 text-center tabular-nums text-ink-2">100%</span>
-          <button id="zoomInBtn" class="btn btn-sm h-5 px-1.5">A+</button>
-        </span>
       </footer>
     </div>
 
