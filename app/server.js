@@ -71,6 +71,8 @@ async function saveLocalConfig(config) {
 
 // ---------- Nhiều key + hạn mức 60 job/giờ mỗi key ----------
 const JOBS_PER_HOUR = 60;
+// Chỉ dùng tới 59 rồi đổi key: chạm 60 là AIVIE khoá key đó trọn 1 giờ.
+const JOBS_USABLE = 59;
 const quota = { used: {}, blocked: {} };
 const nowS = () => Math.floor(Date.now() / 1000);
 const keyLabel = (key) => `…${String(key).slice(-5)}`;
@@ -86,7 +88,7 @@ function reserveKey() {
     const used = (quota.used[label] = (quota.used[label] || []).filter((t) => now - t < 3600));
     const blockedUntil = quota.blocked[label] || 0;
     if (blockedUntil > now) { wait = Math.min(wait, blockedUntil - now); continue; }
-    if (used.length < JOBS_PER_HOUR) { used.push(now); return { key }; }
+    if (used.length < JOBS_USABLE) { used.push(now); return { key }; }
     wait = Math.min(wait, Math.min(...used) + 3600 - now);
   }
   return { wait: Number.isFinite(wait) ? wait + 1 : 60 };
@@ -97,11 +99,11 @@ function quotaJson() {
     const label = keyLabel(key);
     const used = (quota.used[label] = (quota.used[label] || []).filter((t) => now - t < 3600));
     const blockedFor = Math.max(0, (quota.blocked[label] || 0) - now);
-    const n = blockedFor > 0 ? JOBS_PER_HOUR : used.length;
-    usedTotal += n; free += JOBS_PER_HOUR - n;
-    return { label, used: n, limit: JOBS_PER_HOUR, blockedFor };
+    const n = blockedFor > 0 ? JOBS_USABLE : Math.min(used.length, JOBS_USABLE);
+    usedTotal += n; free += JOBS_USABLE - n;
+    return { label, used: n, limit: JOBS_PER_HOUR, usable: JOBS_USABLE, blockedFor };
   });
-  return { keys, keyCount: keys.length, used: usedTotal, total: keys.length * JOBS_PER_HOUR, free };
+  return { keys, keyCount: keys.length, used: usedTotal, total: keys.length * JOBS_USABLE, free };
 }
 const isRateLimit = (msg) => /quá nhanh|rate_limited|rate limit|HTTP 429/i.test(String(msg));
 async function persistConfig() {
@@ -120,6 +122,7 @@ async function createWithRotation(params) {
       quota.used[keyLabel(pick.key)]?.pop();
       if (/HTTP 401/.test(error.message)) {
         quota.blocked[keyLabel(pick.key)] = nowS() + 3600;
+        await persistConfig();
         addServerLog(`Key ${keyLabel(pick.key)} không hợp lệ hoặc đã thu hồi, bỏ qua.`);
         continue;
       }
@@ -127,6 +130,7 @@ async function createWithRotation(params) {
       const m = String(error.message).match(/(\d+)\s*(giây|seconds?|sec|s)/);
       const secs = Math.min(3600, Math.max(10, m ? Number(m[1]) : 3600));
       quota.blocked[keyLabel(pick.key)] = nowS() + secs;
+      await persistConfig();
       addServerLog(`Key ${keyLabel(pick.key)} hết lượt (AIVIE báo chờ ${secs} giây), chuyển key khác.`);
     }
   }
@@ -648,7 +652,7 @@ const server = createServer(async (req, res) => {
     if (req.method === "POST" && url.pathname === "/api/clear-key") {
       mcpSession.apiKey = "";
       mcpSession.keys = [];
-      try { await unlink(configPath); } catch {}
+      await persistConfig();
       return json(res, 200, { ok: true, hasSavedApiKey: false });
     }
     if (req.method === "POST" && url.pathname === "/api/read-files") {

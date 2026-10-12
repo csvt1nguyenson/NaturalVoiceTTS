@@ -757,7 +757,7 @@ function renderQuota(q) {
   if ($("statusQuota")) $("statusQuota").textContent = q.total ? `Lượt tạo job ${q.used}/${q.total} giờ này` : "Lượt tạo job -";
   if ($("keyQuota")) {
     $("keyQuota").innerHTML = (q.keys || []).map((k) => {
-      const pct = Math.min(100, Math.round((k.used / k.limit) * 100));
+      const pct = Math.min(100, Math.round((k.used / (k.usable || k.limit)) * 100));
       const note = k.blockedFor > 0 ? `nghỉ ${Math.ceil(k.blockedFor / 60)} phút` : `${k.used}/${k.limit}`;
       return `<div class="flex items-center gap-2 text-xs text-ink-3"><span class="w-14 shrink-0 font-mono">${escapeHtml(k.label)}</span><span class="h-1 flex-1 overflow-hidden rounded-full bg-raised"><span class="block h-full ${pct >= 100 ? "bg-bad" : "bg-brand"}" style="width:${pct}%"></span></span><span class="w-16 shrink-0 text-right tabular-nums">${note}</span></div>`;
     }).join("");
@@ -1217,7 +1217,7 @@ async function openOutput() {
   const response = await apiFetch("/api/open-output", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ outputFolder: first?.outputFolder || "" })
+    body: JSON.stringify({ outputFolder: first?.outputFolder || $("batchFolderName")?.value.trim() || "" })
   });
   const data = await response.json();
   if (!response.ok || data.error) {

@@ -41,6 +41,8 @@ struct Quota {
     blocked: HashMap<String, u64>,
 }
 const JOBS_PER_HOUR: usize = 60;
+/// Chỉ dùng tới 59 rồi đổi key: chạm 60 là AIVIE khoá key đó trọn 1 giờ.
+const JOBS_USABLE: usize = 59;
 
 pub struct Backend {
     session: Mutex<McpSession>,
@@ -112,17 +114,7 @@ impl Backend {
                 if let Some(first) = session.keys.first() {
                     session.api_key = first.clone();
                 }
-                if let Some(obj) = cfg.get("usage").and_then(Value::as_object) {
-                    for (k, v) in obj {
-                        let ts: Vec<u64> = v.as_array().map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default();
-                        quota.used.insert(k.clone(), ts);
-                    }
-                }
-                if let Some(obj) = cfg.get("blocked").and_then(Value::as_object) {
-                    for (k, v) in obj {
-                        if let Some(t) = v.as_u64() { quota.blocked.insert(k.clone(), t); }
-                    }
-                }
+                quota = load_quota(&cfg);
             }
         }
         let client = reqwest::Client::builder()
@@ -248,7 +240,7 @@ impl Backend {
                 wait = wait.min(blocked_until - now);
                 continue;
             }
-            if used.len() < JOBS_PER_HOUR {
+            if used.len() < JOBS_USABLE {
                 used.push(now);
                 return Ok(key.clone());
             }
@@ -292,12 +284,14 @@ impl Backend {
                     self.release_key(&key);
                     let secs = parse_retry_secs(&e).unwrap_or(3600);
                     self.block_key(&key, secs);
+                    let _ = self.save_config();
                     self.log(format!("Key {} hết lượt (AIVIE báo chờ {secs} giây), chuyển key khác.", key_label(&key)));
                 }
                 Err(e) if e.contains("HTTP 401") => {
                     // Key sai hoặc đã thu hồi: bỏ qua key này 1 giờ, dùng key khác.
                     self.release_key(&key);
                     self.block_key(&key, 3600);
+                    let _ = self.save_config();
                     self.log(format!("Key {} không hợp lệ hoặc đã thu hồi, bỏ qua.", key_label(&key)));
                 }
                 Err(e) => {
@@ -320,12 +314,12 @@ impl Backend {
             let blocked_for = q.blocked.get(&label).copied().unwrap_or(0).saturating_sub(now);
             let used = q.used.entry(label.clone()).or_default();
             used.retain(|t| now.saturating_sub(*t) < 3600);
-            let n = if blocked_for > 0 { JOBS_PER_HOUR } else { used.len() };
+            let n = if blocked_for > 0 { JOBS_USABLE } else { used.len().min(JOBS_USABLE) };
             used_total += n;
-            free_total += JOBS_PER_HOUR - n.min(JOBS_PER_HOUR);
-            list.push(json!({ "label": label, "used": n, "limit": JOBS_PER_HOUR, "blockedFor": blocked_for }));
+            free_total += JOBS_USABLE - n;
+            list.push(json!({ "label": label, "used": n, "limit": JOBS_PER_HOUR, "usable": JOBS_USABLE, "blockedFor": blocked_for }));
         }
-        json!({ "keys": list, "keyCount": keys.len(), "used": used_total, "total": keys.len() * JOBS_PER_HOUR, "free": free_total })
+        json!({ "keys": list, "keyCount": keys.len(), "used": used_total, "total": keys.len() * JOBS_USABLE, "free": free_total })
     }
 
     async fn initialize(&self, url: Option<String>, api_key: Option<String>) -> ApiResult {
@@ -731,7 +725,7 @@ impl Backend {
                     sess.api_key.clear();
                     sess.keys.clear();
                 }
-                let _ = std::fs::remove_file(self.config_path());
+                let _ = self.save_config();
                 Ok(json!({ "ok": true, "hasSavedApiKey": false }))
             }
             "/api/read-files" => {
@@ -810,9 +804,15 @@ impl Backend {
             }
             "/api/join" => self.join_mp3_and_srt(&body),
             "/api/open-output" => {
-                let target = self.resolve_target_directory(&s("outputFolder").unwrap_or_default());
-                std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
-                run_hidden("explorer.exe").arg(&target).spawn().map_err(|e| e.to_string())?;
+                let mut target = self.resolve_target_directory(&s("outputFolder").unwrap_or_default());
+                // Thư mục chưa có (chưa render) thì mở thư mục cha gần nhất đang tồn tại, không tạo thư mục rỗng.
+                while !target.exists() {
+                    match target.parent().map(Path::to_path_buf) {
+                        Some(p) if p != target && !p.as_os_str().is_empty() => target = p,
+                        _ => break,
+                    }
+                }
+                open_in_explorer(&target, false)?;
                 Ok(json!({ "path": target }))
             }
             "/api/open-path" => {
@@ -828,7 +828,7 @@ impl Backend {
                 if !full.exists() {
                     return Err("File không tồn tại".into());
                 }
-                run_hidden("explorer.exe").arg(format!("/select,{}", full.display())).spawn().map_err(|e| e.to_string())?;
+                open_in_explorer(&full, true)?;
                 Ok(json!({ "path": full }))
             }
             _ => Err(format!("Không có endpoint: {path}")),
@@ -860,6 +860,51 @@ fn run_hidden(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
     cmd
+}
+
+/// Mở Explorer tại thư mục, hoặc chọn sẵn một file.
+/// Explorer đòi dấu ngoặc kép bao RIÊNG đường dẫn. Nếu bọc cả cụm `/select,...` (cách Rust tự làm khi
+/// đường dẫn có dấu cách) thì Explorer không hiểu và mở thư mục Documents.
+fn open_in_explorer(path: &Path, select: bool) -> Result<(), String> {
+    let mut p = path.to_string_lossy().replace('/', "\\");
+    while p.len() > 3 && p.ends_with('\\') {
+        p.pop();
+    }
+    let mut cmd = std::process::Command::new("explorer.exe");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        if select {
+            cmd.raw_arg(format!("/select,\"{p}\""));
+        } else {
+            cmd.raw_arg(format!("\"{p}\""));
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = select;
+        cmd.arg(&p);
+    }
+    cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Đọc lượt đã dùng và trạng thái khoá của từng key từ file config (để tắt mở app không bị reset).
+fn load_quota(cfg: &Value) -> Quota {
+    let mut quota = Quota::default();
+    if let Some(obj) = cfg.get("usage").and_then(Value::as_object) {
+        for (k, v) in obj {
+            let ts: Vec<u64> = v.as_array().map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default();
+            quota.used.insert(k.clone(), ts);
+        }
+    }
+    if let Some(obj) = cfg.get("blocked").and_then(Value::as_object) {
+        for (k, v) in obj {
+            if let Some(t) = v.as_u64() {
+                quota.blocked.insert(k.clone(), t);
+            }
+        }
+    }
+    quota
 }
 
 fn now_s() -> u64 {
@@ -1118,4 +1163,35 @@ fn url_decode(s: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quota_survives_restart() {
+        let key = "aiv_abcdefghijklmnopqrstuvwxyz_wP0XA";
+        let label = key_label(key);
+        let mut q = Quota::default();
+        q.used.insert(label.clone(), vec![100, 200, 300]);
+        q.blocked.insert(label.clone(), 999);
+        // Ghi ra đúng như save_config, rồi đọc lại như lúc mở app.
+        let saved = serde_json::to_string_pretty(&json!({ "usage": json!(q.used), "blocked": json!(q.blocked) })).unwrap();
+        let loaded = load_quota(&serde_json::from_str(&saved).unwrap());
+        assert_eq!(loaded.used.get(&label).map(|v| v.len()), Some(3));
+        assert_eq!(loaded.blocked.get(&label), Some(&999));
+    }
+
+    #[test]
+    fn switches_key_at_59() {
+        assert_eq!(JOBS_USABLE, 59);
+        assert!(JOBS_USABLE < JOBS_PER_HOUR);
+    }
+
+    #[test]
+    fn parses_many_keys() {
+        let keys = parse_keys("aiv_aaaaaaaaaaaaaaaa\n aiv_bbbbbbbbbbbbbbbb \naiv_aaaaaaaaaaaaaaaa");
+        assert_eq!(keys.len(), 2);
+    }
 }
