@@ -246,3 +246,45 @@ test("scanning the same folder twice in a row only scans once", async () => {
     context.window.__TAURI__.core.invoke = original;
   }
 });
+
+test("failed rows and failed files show a retry button; finished ones do not", () => {
+  evaluate(`state.rows = [
+    { source: "Q:\\\\p1.txt", name: "p1.txt", folder: "Q:\\\\p1", mode: "batch", part: 1, text: "a", status: "Done", output: "x" },
+    { source: "Q:\\\\p1.txt", name: "p1.txt", folder: "Q:\\\\p1", mode: "batch", part: 2, text: "b", status: "Error", output: "" },
+    { source: "Q:\\\\p2.txt", name: "p2.txt", folder: "Q:\\\\p2", mode: "batch", part: 1, text: "c", status: "Done", output: "y" },
+  ]; state.activeSource = "Q:\\\\p1.txt"; render();`);
+  const rows = document.getElementById("rows").innerHTML;
+  assert.equal((rows.match(/data-retry="/g) || []).length, 1);
+  assert.match(rows, /data-retry="1"/);
+  const files = document.getElementById("batchRows").innerHTML;
+  assert.equal((files.match(/data-retry-source=/g) || []).length, 1);
+  assert.match(files, /data-retry-source="Q:\\p1\.txt"/);
+  evaluate("state.rows = []; state.activeSource = ''; render();");
+});
+
+test("retry sends only the chosen failed rows to SonicVoice", async () => {
+  const original = context.window.__TAURI__.core.invoke;
+  const created = [];
+  context.window.__TAURI__.core.invoke = async (_c, { request }) => {
+    const action = request.body?.action;
+    if (action === "voice") return { status: 200, body: { id: "abc123", provider: "eleven", ready: true } };
+    if (action === "create") { created.push(Array.from(request.body.job.texts || [])); return { status: 422, body: { error: "test stop" } }; }
+    return { status: 200, body: { count: 1 } };
+  };
+  try {
+    for (const [id, v] of Object.entries({ provider: "eleven", model: "", language: "", voiceId: "abc123", speed: "1" })) document.getElementById(id).value = v;
+    evaluate(`state.models = [{ model_id: "eleven_v3", languages: ["en"] }]; state.hasKey = true; state.running = false;
+    state.rows = [
+      { source: "R:\\a.txt", name: "a.txt", folder: "R:\\a", mode: "batch", part: 1, text: "one", status: "Done", output: "x" },
+      { source: "R:\\a.txt", name: "a.txt", folder: "R:\\a", mode: "batch", part: 2, text: "two", status: "Error", output: "" },
+      { source: "R:\\a.txt", name: "a.txt", folder: "R:\\a", mode: "batch", part: 3, text: "three", status: "Error", output: "" },
+    ];`);
+    await evaluate("retryRows([state.rows[1]])");
+    assert.deepEqual(created, [["two"]]);
+    assert.equal(evaluate("state.rows[0].status"), "Done");
+    assert.equal(evaluate("state.rows[2].status"), "Error");
+  } finally {
+    evaluate("state.rows = []; state.running = false; state.hasKey = false; render();");
+    context.window.__TAURI__.core.invoke = original;
+  }
+});

@@ -148,7 +148,7 @@ function renderRows() {
       <td class="td text-ink-3">${index + 1}</td>
       <td class="td text-ink-2">${item.part || ""}</td>
       <td class="td" title="${escapeHtml(item.fileName || item.source || "")}">${escapeHtml(item.text)}</td>
-      <td class="td">${statusPill(item.status, item.error)}</td>
+      <td class="td">${statusPill(item.status, item.error)}${item.status === "Error" ? `<button class="btn btn-sm ml-1 h-5 px-1.5" data-retry-item="${state.items.indexOf(item)}" title="Chỉ chạy lại dòng này">Chạy lại</button>` : ""}</td>
       <td class="td">${display ? fileLink(filePath, display) : '<span class="text-ink-3">—</span>'}</td>
     </tr>`;
   }).join("") || '<tr><td class="td text-ink-3" colspan="5">Chưa có dòng nào. Nhập file .srt/.txt/.dgt hoặc kéo thả vào đây.</td></tr>';
@@ -170,7 +170,7 @@ function renderBatchFiles() {
       <td class="td text-ink-3">${index + 1}</td>
       <td class="td truncate" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</td>
       <td class="td text-ink-2">${done} / ${items.length}</td>
-      <td class="td">${pill}</td>
+      <td class="td">${pill}${st === "Error" ? `<button class="btn btn-sm ml-1 h-5 px-1.5" data-retry-file="${escapeHtml(file.source)}" title="Chạy lại các dòng lỗi của file này">Chạy lại</button>` : ""}</td>
       <td class="td truncate text-xs text-ink-3" title="${escapeHtml(folder)}">${escapeHtml(folder)}</td>
     </tr>`;
   }).join("") || '<tr><td class="td text-ink-3" colspan="5">Chưa có file. Chọn thư mục chứa .txt rồi bấm Quét thư mục.</td></tr>';
@@ -1098,6 +1098,41 @@ async function runPool(queue, label) {
   return { ok, failed, fatal };
 }
 
+// Chạy lại riêng các dòng lỗi được chọn (một dòng, hoặc mọi dòng lỗi của một file).
+// Dòng đã xong giữ nguyên; file đủ dòng thì tự ghép lại full MP3 + SRT.
+async function retryItems(items) {
+  if (state.running) return log("Đang chạy. Chờ xong hoặc bấm Stop rồi mới chạy lại dòng lỗi.");
+  if (!$("toolSelect").value) return log("Chưa kết nối AIVIE.");
+  const targets = items.filter((item) => item && item.status === "Error");
+  if (!targets.length) return log("Không có dòng lỗi để chạy lại.");
+  if (!await validateVoiceModel()) return;
+  targets.forEach((item) => { item.status = "Queued"; item.error = ""; });
+  state.running = true; state.batchMode = true;
+  renderBatchFiles(); renderRows(); updateStatusBar();
+  const label = fileStem(targets[0].fileName || targets[0].source || "");
+  log(`Chạy lại ${targets.length} dòng lỗi của ${label}.`);
+  try {
+    if (renderMode() === "file") {
+      const sources = [...new Set(targets.map((item) => item.source))];
+      await runFilePool(sources.map((src) => ({ label: fileStem(src.split(/[\\/]/).pop()), items: targets.filter((item) => item.source === src) })));
+    } else {
+      await runPool(targets, label);
+    }
+  } finally {
+    state.running = false; state.batchMode = false;
+    updateStatusBar();
+  }
+  if (renderMode() === "line" && $("autoSrt").checked) {
+    for (const src of new Set(targets.map((item) => item.source))) {
+      const all = state.items.filter((item) => item.source === src);
+      if (all.every(isDone)) {
+        try { await joinItems(all, true); } catch (error) { log(`Ghép lại ${fileStem(src.split(/[\\/]/).pop())}: ${error.message}`); }
+      }
+    }
+  }
+  renderBatchFiles(); renderRows();
+}
+
 async function startQueue() {
   if (state.running) return log("Đang có queue chạy, bỏ qua lần bấm trùng.");
   if (!$("toolSelect").value) return log("Chưa kết nối AIVIE.");
@@ -1345,6 +1380,16 @@ $("importFileBtn").addEventListener("click", () => pickAndImportSingle("single")
 $("importFolderBtn").addEventListener("click", () => pickAndImportSingle("folder").then((handled) => { if (!handled) $("singleFolderInput").click(); }).catch((e) => log(e.message)));
 $("importVoiceBtn").addEventListener("click", () => log("Import Voice sẽ dùng khi có file voice library/template. Hiện chưa cần cho queue TTS."));
 $("openOutputBtn").addEventListener("click", openOutput);
+$("rows").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-retry-item]");
+  if (button) retryItems([state.items[Number(button.dataset.retryItem)]]).catch((e) => log(e.message));
+});
+$("batchFilesRows").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-retry-file]");
+  if (!button) return;
+  event.stopPropagation();
+  retryItems(state.items.filter((item) => item.source === button.dataset.retryFile)).catch((e) => log(e.message));
+});
 $("openLogFile")?.addEventListener("click", (event) => {
   event.preventDefault(); event.stopPropagation();
   flushLogFile().then(() => apiFetch("/api/log-open", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ date: localDate() }) }))

@@ -188,9 +188,9 @@ function render() {
     const group = state.rows.filter((row) => row.source === source);
     const complete = group.filter((row) => row.status === "Done").length;
     const status = group.some((row) => row.status === "Error") ? "Error" : complete === group.length ? "Done" : group.some((row) => /running|admitted|Submitting/i.test(row.status)) ? "Running" : "Queued";
-    return `<tr class="cursor-pointer" data-source="${escapeHtml(source)}" aria-selected="${source === state.activeSource}"><td class="td">${index + 1}</td><td class="td truncate" title="${escapeHtml(group[0].name)}">${escapeHtml(group[0].name)}</td><td class="td">${complete}/${group.length}</td><td class="td"><span class="pill ${badge(status)}">${status}</span></td><td class="td truncate"><button class="file-link text-left" data-folder="${escapeHtml(group[0].folder)}" title="Mở thư mục output">${escapeHtml(group[0].folder)}</button></td></tr>`;
+    return `<tr class="cursor-pointer" data-source="${escapeHtml(source)}" aria-selected="${source === state.activeSource}"><td class="td">${index + 1}</td><td class="td truncate" title="${escapeHtml(group[0].name)}">${escapeHtml(group[0].name)}</td><td class="td">${complete}/${group.length}</td><td class="td"><span class="pill ${badge(status)}">${status}</span>${status === "Error" ? `<button class="btn btn-sm ml-1 h-5 px-1.5" data-retry-source="${escapeHtml(source)}" title="Chạy lại các đoạn lỗi của file này">Chạy lại</button>` : ""}</td><td class="td truncate"><button class="file-link text-left" data-folder="${escapeHtml(group[0].folder)}" title="Mở thư mục output">${escapeHtml(group[0].folder)}</button></td></tr>`;
   }).join("");
-  $("rows").innerHTML = visible.map((row, index) => `<tr><td class="td">${index + 1}</td><td class="td">${row.part}</td><td class="td"><div class="max-h-20 overflow-y-auto break-words leading-[18px]">${escapeHtml(row.text)}</div></td><td class="td"><span class="pill ${badge(row.status)}">${escapeHtml(row.status)}</span></td><td class="td">${row.output ? `<button class="file-link" data-open="${state.rows.indexOf(row)}" title="Mở file audio">${escapeHtml(row.part)}.mp3</button>` : ""}</td></tr>`).join("") || '<tr><td class="td text-ink-3" colspan="5">Chưa có dòng nào. Nhập file .txt/.srt hoặc kéo thả vào đây.</td></tr>';
+  $("rows").innerHTML = visible.map((row, index) => `<tr><td class="td">${index + 1}</td><td class="td">${row.part}</td><td class="td"><div class="max-h-20 overflow-y-auto break-words leading-[18px]">${escapeHtml(row.text)}</div></td><td class="td"><span class="pill ${badge(row.status)}">${escapeHtml(row.status)}</span>${row.status === "Error" ? `<button class="btn btn-sm ml-1 h-5 px-1.5" data-retry="${state.rows.indexOf(row)}" title="Chỉ chạy lại đoạn này">Chạy lại</button>` : ""}</td><td class="td">${row.output ? `<button class="file-link" data-open="${state.rows.indexOf(row)}" title="Mở file audio">${escapeHtml(row.part)}.mp3</button>` : ""}</td></tr>`).join("") || '<tr><td class="td text-ink-3" colspan="5">Chưa có dòng nào. Nhập file .txt/.srt hoặc kéo thả vào đây.</td></tr>';
   $("statusLabel").textContent = state.running ? "Đang chạy" : state.rows.length && done === state.rows.length ? "Hoàn tất" : "Sẵn sàng";
   $("statusBar").style.width = `${state.rows.length ? Math.round(done / state.rows.length * 100) : 0}%`;
   $("statusLines").textContent = `${done} / ${state.rows.length} dòng`;
@@ -408,10 +408,11 @@ function nodesForRow(job, index) {
   return [];
 }
 
-async function runRows(mode, onlyErrors = false) {
+// only: Set các dòng cần chạy (nút "Chạy lại" ở từng dòng/từng file); để trống = cả hàng đợi của mode.
+async function runRows(mode, onlyErrors = false, only = null) {
   if (state.running) return;
   if (!state.hasKey) { log("Hãy lưu SonicVoice API key trước."); return; }
-  const pending = state.rows.filter((row) => row.mode === mode && (onlyErrors ? row.status === "Error" : row.status === "Queued" || row.status === "Error"));
+  const pending = state.rows.filter((row) => row.mode === mode && (!only || only.has(row)) && (onlyErrors ? row.status === "Error" : row.status === "Queued" || row.status === "Error"));
   if (!pending.length) { log("Không có đoạn cần chạy."); return; }
   try { jobPayload([pending[0]], pending[0].srtText ? "srt" : "batch"); await validateSelection(pending); }
   catch (error) { log(error.message); return; }
@@ -568,8 +569,15 @@ $("batchStop").onclick = stop;
 $("clearQueue").onclick = () => { if (!state.running) { state.rows = state.rows.filter((row) => row.mode !== "batch"); if (!state.rows.some((row) => row.source === state.activeSource)) state.activeSource = state.rows[0]?.source || ""; render(); } };
 $("openLogFile").onclick = action(async (event) => { event?.preventDefault(); event?.stopPropagation(); await flushLogFile(); await api("/api/log-open", { date: localDate() }); });
 $("openOutput").onclick = action(() => api("/api/open-output", { outputFolder: state.rows.find((row) => row.source === state.activeSource)?.folder || "" }));
-$("rows").onclick = action(async (event) => { const button = event.target.closest("button[data-open]"); if (button) await api("/api/open-path", { path: state.rows[Number(button.dataset.open)].output }); });
-$("batchRows").onclick = action(async (event) => { const button = event.target.closest("button[data-folder]"); if (button) { await api("/api/open-output", { outputFolder: button.dataset.folder }); return; } const row = event.target.closest("tr[data-source]"); if (row) selectSource(row.dataset.source); });
+function retryRows(rows) {
+  const targets = rows.filter((row) => row && row.status === "Error");
+  if (state.running) { log("Đang chạy. Chờ xong hoặc bấm Stop rồi mới chạy lại đoạn lỗi."); return; }
+  if (!targets.length) { log("Không có đoạn lỗi để chạy lại."); return; }
+  log(`Chạy lại ${targets.length} đoạn lỗi của ${targets[0].name}.`);
+  return runRows(targets[0].mode, true, new Set(targets));
+}
+$("rows").onclick = action(async (event) => { const retry = event.target.closest("button[data-retry]"); if (retry) { await retryRows([state.rows[Number(retry.dataset.retry)]]); return; } const button = event.target.closest("button[data-open]"); if (button) await api("/api/open-path", { path: state.rows[Number(button.dataset.open)].output }); });
+$("batchRows").onclick = action(async (event) => { const retry = event.target.closest("button[data-retry-source]"); if (retry) { await retryRows(state.rows.filter((row) => row.source === retry.dataset.retrySource)); return; } const button = event.target.closest("button[data-folder]"); if (button) { await api("/api/open-output", { outputFolder: button.dataset.folder }); return; } const row = event.target.closest("tr[data-source]"); if (row) selectSource(row.dataset.source); });
 
 queueLogFile(`===== [Sonic] Mở trang SonicVoice ${localDate()} ${new Date().toLocaleTimeString("vi-VN")} =====`);
 render();
