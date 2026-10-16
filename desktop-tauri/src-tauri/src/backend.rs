@@ -11,6 +11,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Manager, State};
 
 const DEFAULT_MCP_URL: &str = "https://app.aivie.pro/api/v1/mcp";
+const SONIC_URL: &str = "https://sonicvoice.pro/api";
 const DRIVE_ALIASES: &[(&str, &str)] = &[
     ("Y:", r"\\kavomedia\TaiNguyen"),
     ("Z:", r"\\KAVO73NGXI\Tai Lieu"),
@@ -53,6 +54,7 @@ pub struct Backend {
     pub output_dir: PathBuf,
     pub ffmpeg: PathBuf,
     client: reqwest::Client,
+    sonic_key: Mutex<String>,
 }
 
 #[derive(Deserialize)]
@@ -121,6 +123,7 @@ impl Backend {
             .timeout(Duration::from_secs(120))
             .build()
             .expect("reqwest client");
+        let sonic_key = std::fs::read_to_string(data_dir.join("sonic-key.txt")).unwrap_or_default().trim().to_string();
         Self {
             session: Mutex::new(session),
             quota: Mutex::new(quota),
@@ -130,7 +133,19 @@ impl Backend {
             output_dir,
             ffmpeg,
             client,
+            sonic_key: Mutex::new(sonic_key),
         }
+    }
+
+    /// File log của một ngày: Documents\NaturalVoice\logs\NaturalVoice-YYYY-MM-DD.log
+    fn log_file_path(&self, date: &str) -> Result<PathBuf, String> {
+        let ok = date.len() == 10 && date.chars().enumerate().all(|(i, c)| if i == 4 || i == 7 { c == '-' } else { c.is_ascii_digit() });
+        if !ok {
+            return Err("Ngày của file log không hợp lệ.".into());
+        }
+        let dir = self.output_dir.join("logs");
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        Ok(dir.join(format!("NaturalVoice-{date}.log")))
     }
 
     fn config_path(&self) -> PathBuf {
@@ -607,18 +622,20 @@ impl Backend {
         for (index, item) in items.iter().enumerate() {
             let text = item.get("text").and_then(Value::as_str).unwrap_or("");
             let start = item.get("startTime").and_then(Value::as_str).and_then(parse_srt_time).unwrap_or(cursor);
+            let duration = item.get("durationSeconds").and_then(Value::as_f64).filter(|v| v.is_finite() && *v > 0.0);
             let end = item
                 .get("endTime")
                 .and_then(Value::as_str)
                 .and_then(parse_srt_time)
-                .unwrap_or(start + estimate_duration(text));
+                .unwrap_or(start + duration.unwrap_or_else(|| estimate_duration(text)));
             cursor = cursor.max(end);
             srt.push_str(&format!("{}\n{} --> {}\n{}\n\n", index + 1, srt_time(start), srt_time(end), text));
         }
         let srt = srt.trim_end_matches('\n').to_string() + "\n";
         let base = safe_name(body.get("baseName").and_then(Value::as_str).filter(|s| !s.is_empty()).unwrap_or("joined"));
         let srt_file = parent_dir.join(format!("{base}.srt"));
-        std::fs::write(&srt_file, &srt).map_err(|e| e.to_string())?;
+        let write_srt = body.get("writeSrt").and_then(Value::as_bool).unwrap_or(true);
+        if write_srt { std::fs::write(&srt_file, &srt).map_err(|e| e.to_string())?; }
 
         let mp3_files: Vec<PathBuf> = items
             .iter()
@@ -659,8 +676,8 @@ impl Backend {
         Ok(json!({
             "targetDir": target_dir,
             "parentDir": parent_dir,
-            "srt": srt_file.file_name().map(|s| s.to_string_lossy().to_string()),
-            "srtPath": srt_file,
+            "srt": if write_srt { srt_file.file_name().map(|s| s.to_string_lossy().to_string()) } else { None },
+            "srtPath": if write_srt { Some(srt_file) } else { None },
             "joinedMp3": joined.as_ref().and_then(|p| p.file_name()).map(|s| s.to_string_lossy().to_string()),
             "joinedMp3Path": joined,
             "warning": warning
@@ -668,6 +685,163 @@ impl Backend {
     }
 
     // ---------- Dispatcher ----------
+
+    async fn sonic_call(&self, action: &str, body: &Value) -> ApiResult {
+        if action == "status" {
+            return Ok(json!({ "hasKey": !self.sonic_key.lock().unwrap().is_empty() }));
+        }
+        if action == "save-key" {
+            let key = body.get("key").and_then(Value::as_str).unwrap_or("").trim();
+            if !key.starts_with("wp_") { return Err("SonicVoice API key phải bắt đầu bằng wp_.".into()); }
+            let check = self.client.get(format!("{SONIC_URL}/v1/me/balance"))
+                .header("X-API-Key", key).send().await.map_err(|e| e.to_string())?;
+            if !check.status().is_success() {
+                let status = check.status();
+                let detail = check.text().await.unwrap_or_default();
+                return Err(if status.as_u16() == 401 {
+                    "SonicVoice từ chối API key (401). Kiểm tra key còn hiệu lực trong tài khoản SonicVoice và tạo key mới nếu đã bị thu hồi.".into()
+                } else {
+                    format!("SonicVoice HTTP {}: {}", status.as_u16(), detail.chars().take(500).collect::<String>())
+                });
+            }
+            std::fs::write(self.data_dir.join("sonic-key.txt"), key).map_err(|e| e.to_string())?;
+            *self.sonic_key.lock().unwrap() = key.to_string();
+            return Ok(json!({ "ok": true }));
+        }
+        if action == "clear-key" {
+            *self.sonic_key.lock().unwrap() = String::new();
+            let _ = std::fs::remove_file(self.data_dir.join("sonic-key.txt"));
+            return Ok(json!({ "ok": true }));
+        }
+        let key = self.sonic_key.lock().unwrap().clone();
+        if key.is_empty() { return Err("Chưa lưu SonicVoice API key.".into()); }
+        let id = body.get("jobId").and_then(Value::as_str).unwrap_or("");
+        if matches!(action, "job" | "download" | "srt" | "cancel") && (id.is_empty() || !id.is_ascii() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')) {
+            return Err("Job ID không hợp lệ.".into());
+        }
+        if action == "download-group" {
+            let nodes = body.get("nodeIds").and_then(Value::as_array).ok_or("Thiếu nodeIds.")?;
+            if nodes.is_empty() || nodes.len() > 200 || id.is_empty() || !id.is_ascii() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+                return Err("Job ID hoặc danh sách node không hợp lệ.".into());
+            }
+            let dir = self.resolve_target_directory(body.get("outputFolder").and_then(Value::as_str).unwrap_or("sonic-import"));
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            if !self.ffmpeg.exists() { return Err("Không tìm thấy ffmpeg để chuyển audio sang MP3.".into()); }
+            let stem = safe_name(body.get("part").and_then(Value::as_str).unwrap_or("1"));
+            let path = dir.join(format!("{stem}.mp3"));
+            let mut temporary = Vec::new();
+            let result: ApiResult = async {
+                for (index, node) in nodes.iter().enumerate() {
+                    let node_id = node.as_str().ok_or("Node ID không hợp lệ.")?;
+                    if node_id.is_empty() || !node_id.is_ascii() || !node_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+                        return Err("Node ID không hợp lệ.".into());
+                    }
+                    let (content_type, bytes) = fetch_bytes(self.client.get(format!("{SONIC_URL}/v1/tts/jobs/{id}/artifacts/{node_id}"))
+                        .header("X-API-Key", &key)).await?;
+                    let extension = if bytes.starts_with(b"ID3") || (bytes.len() > 1 && bytes[0] == 0xff && bytes[1] & 0xe0 == 0xe0) {
+                        "mp3"
+                    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WAVE".as_slice()) {
+                        "wav"
+                    } else {
+                        return Err(format!("SonicVoice node {node_id} không chứa audio ({content_type}). Hãy chạy lại để tải artifact âm thanh."));
+                    };
+                    let temp = dir.join(format!(".sonic-{id}-{stem}-{index}.{extension}"));
+                    std::fs::write(&temp, bytes).map_err(|e| e.to_string())?;
+                    temporary.push(temp);
+                }
+                let list = dir.join(format!(".sonic-{id}-{stem}.txt"));
+                let contents = temporary.iter().map(|p| format!("file '{}'", p.display().to_string().replace('\'', "'\\''"))).collect::<Vec<_>>().join("\n");
+                std::fs::write(&list, contents).map_err(|e| e.to_string())?;
+                temporary.push(list.clone());
+                let output = run_hidden(&self.ffmpeg).args(["-y", "-f", "concat", "-safe", "0", "-i"]).arg(&list)
+                    .args(["-codec:a", "libmp3lame", "-q:a", "2"]).arg(&path)
+                    .output().map_err(|e| e.to_string())?;
+                if !output.status.success() { return Err(String::from_utf8_lossy(&output.stderr).to_string()); }
+                Ok(json!({ "fullPath": path, "filename": format!("{stem}.mp3") }))
+            }.await;
+            for temp in temporary { let _ = std::fs::remove_file(temp); }
+            return result;
+        }
+        let mut request = match action {
+            "balance" => self.client.get(format!("{SONIC_URL}/v1/me/balance")),
+            "voices" => {
+                let mut params = vec![("provider", body.get("provider").and_then(Value::as_str).unwrap_or("mini").to_string()),
+                    ("q", body.get("search").and_then(Value::as_str).unwrap_or("").to_string()),
+                    ("limit", "50".to_string()),
+                    ("offset", body.get("offset").and_then(Value::as_u64).unwrap_or(0).to_string())];
+                for (field, parameter) in [("language", "language"), ("gender", "gender")] {
+                    if let Some(value) = body.get(field).and_then(Value::as_str).filter(|value| !value.is_empty()) {
+                        params.push((parameter, value.to_string()));
+                    }
+                }
+                self.client.get(format!("{SONIC_URL}/v1/voices")).query(&params)
+            },
+            "models" => self.client.get(format!("{SONIC_URL}/v1/models"))
+                .query(&[("provider", body.get("provider").and_then(Value::as_str).unwrap_or("mini"))]),
+            "voice" => {
+                let voice_id = body.get("voiceId").and_then(Value::as_str).unwrap_or("");
+                if voice_id.is_empty() || !voice_id.is_ascii() || !voice_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') { return Err("Voice ID không hợp lệ.".into()); }
+                self.client.get(format!("{SONIC_URL}/v1/voices/{voice_id}"))
+            },
+            "create" => self.client.post(format!("{SONIC_URL}/v1/tts/jobs"))
+                .json(body.get("job").ok_or("Thiếu nội dung job.")?),
+            "job" => self.client.get(format!("{SONIC_URL}/v1/tts/jobs/{id}")),
+            "download" => self.client.get(format!("{SONIC_URL}/v1/tts/jobs/{id}/audio")),
+            "srt" => self.client.get(format!("{SONIC_URL}/v1/tts/jobs/{id}/srt")),
+            "cancel" => self.client.delete(format!("{SONIC_URL}/v1/tts/jobs/{id}")),
+            // Tìm lại job theo tiêu đề khi mất kết nối lúc tạo, để không tạo trùng job.
+            "find-job" => self.client.get(format!("{SONIC_URL}/v1/tts/jobs"))
+                .query(&[("q", body.get("title").and_then(Value::as_str).unwrap_or("")), ("limit", "10")]),
+            _ => return Err("SonicVoice action không hợp lệ.".into()),
+        };
+        request = request.header("X-API-Key", key);
+        if action == "download" {
+            let (content_type, bytes) = fetch_bytes(request).await?;
+            let is_mp3 = content_type.contains("mpeg") || bytes.starts_with(b"ID3") || (bytes.len() > 1 && bytes[0] == 0xff && bytes[1] & 0xe0 == 0xe0);
+            let ext = if is_mp3 { "mp3" } else { "wav" };
+            let folder = body.get("outputFolder").and_then(Value::as_str).unwrap_or("sonic-import");
+            let dir = self.resolve_target_directory(folder);
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            let stem = safe_name(body.get("part").and_then(Value::as_str).unwrap_or("1"));
+            let name = format!("{stem}.mp3");
+            let path = dir.join(&name);
+            if ext == "mp3" {
+                std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+            } else {
+                if !self.ffmpeg.exists() { return Err("Không tìm thấy ffmpeg để chuyển WAV sang MP3.".into()); }
+                let input = dir.join(format!("{stem}.sonic.wav"));
+                std::fs::write(&input, &bytes).map_err(|e| e.to_string())?;
+                let output = run_hidden(&self.ffmpeg).args(["-y", "-i"]).arg(&input)
+                    .args(["-codec:a", "libmp3lame", "-q:a", "2"]).arg(&path)
+                    .output().map_err(|e| e.to_string())?;
+                let _ = std::fs::remove_file(&input);
+                if !output.status.success() { return Err(String::from_utf8_lossy(&output.stderr).to_string()); }
+            }
+            return Ok(json!({ "fullPath": path, "filename": name, "bytes": bytes.len() }));
+        }
+        // Tạo job không thử lại (Sonic không chống trùng), trừ khi chưa kết nối được tới máy chủ.
+        let response = send_with_retry(request, action != "create").await?;
+        let status = response.status();
+        if !status.is_success() {
+            let detail = response.text().await.unwrap_or_default();
+            return Err(format!("SonicVoice HTTP {}: {}", status.as_u16(), detail.chars().take(500).collect::<String>()));
+        }
+        if action == "srt" {
+            let text = response.text().await.map_err(|e| describe_net_error(&e))?;
+            let mut saved = Value::Null;
+            // Có outputFolder + baseName thì lưu luôn SRT của Sonic cạnh file nguồn (cùng chỗ với _full.mp3).
+            if let (Some(folder), Some(base)) = (body.get("outputFolder").and_then(Value::as_str), body.get("baseName").and_then(Value::as_str)) {
+                let dir = self.resolve_target_directory(folder);
+                let parent = dir.parent().map(Path::to_path_buf).unwrap_or_else(|| dir.clone());
+                std::fs::create_dir_all(&parent).map_err(|e| e.to_string())?;
+                let path = parent.join(format!("{}.srt", safe_name(base)));
+                std::fs::write(&path, &text).map_err(|e| e.to_string())?;
+                saved = json!(path);
+            }
+            return Ok(json!({ "text": text, "savedPath": saved }));
+        }
+        response.json::<Value>().await.map_err(|e| describe_net_error(&e))
+    }
 
     pub async fn handle(&self, req: ApiRequest) -> ApiResult {
         let path = req.path.split('?').next().unwrap_or("").to_string();
@@ -684,6 +858,30 @@ impl Backend {
         let s = |k: &str| body.get(k).and_then(Value::as_str).map(String::from);
 
         match path.as_str() {
+            "/api/sonic" => self.sonic_call(s("action").as_deref().unwrap_or(""), &body).await,
+            // Log ghi ra file theo ngày (giống AMEEncodingLog của Media Encoder).
+            "/api/log-append" => {
+                let path = self.log_file_path(&s("date").unwrap_or_default())?;
+                let lines: Vec<String> = body.get("lines").and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(Value::as_str).map(|l| l.replace(['\r', '\n'], " ")).collect())
+                    .unwrap_or_default();
+                if !lines.is_empty() {
+                    use std::io::Write as _;
+                    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&path).map_err(|e| e.to_string())?;
+                    let mut text = lines.join("\r\n");
+                    text.push_str("\r\n");
+                    file.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+                }
+                Ok(json!({ "path": path, "written": lines.len() }))
+            }
+            "/api/log-open" => {
+                let path = self.log_file_path(&s("date").unwrap_or_default())?;
+                if !path.exists() {
+                    std::fs::write(&path, "").map_err(|e| e.to_string())?;
+                }
+                open_in_explorer(&path, false)?;
+                Ok(json!({ "path": path }))
+            }
             "/api/logs" => {
                 let since: usize = query.get("since").and_then(|v| v.parse().ok()).unwrap_or(0);
                 let logs = self.logs.lock().unwrap();
@@ -739,6 +937,28 @@ impl Backend {
                     }));
                 }
                 Ok(json!({ "count": files.len(), "files": files }))
+            }
+            "/api/prepare-output-folders" => {
+                let sources = body.get("sourcePaths").and_then(Value::as_array).ok_or("Thiếu danh sách file nguồn.")?;
+                let mut folders = Vec::new();
+                for raw in sources {
+                    let source = raw.as_str().ok_or("Đường dẫn file nguồn không hợp lệ.")?;
+                    let source = resolve_folder_path(source);
+                    if !source.is_file() {
+                        return Err(format!("Không tìm thấy file nguồn: {}", source.display()));
+                    }
+                    let extension = source.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+                    if !extension.eq_ignore_ascii_case("txt") && !extension.eq_ignore_ascii_case("srt") {
+                        return Err(format!("Chỉ hỗ trợ TXT/SRT: {}", source.display()));
+                    }
+                    let stem = source.file_stem().ok_or("Tên file nguồn không hợp lệ.")?;
+                    let parent = source.parent().ok_or("Không xác định được thư mục file nguồn.")?;
+                    let folder = parent.join(stem);
+                    std::fs::create_dir_all(&folder)
+                        .map_err(|error| format!("Không tạo được thư mục {}: {error}", folder.display()))?;
+                    folders.push(folder);
+                }
+                Ok(json!({ "count": folders.len(), "folders": folders }))
             }
             "/api/scan-folder" => {
                 let folder = s("folderPath").ok_or("Chưa nhập đường dẫn thư mục.")?;
@@ -905,6 +1125,74 @@ fn load_quota(cfg: &Value) -> Quota {
         }
     }
     quota
+}
+
+/// Mô tả lỗi mạng kèm nguyên nhân gốc (vd "connection closed before message completed").
+fn describe_net_error(e: &reqwest::Error) -> String {
+    use std::error::Error as _;
+    let mut detail = e.to_string();
+    let mut source = e.source();
+    while let Some(s) = source {
+        detail = s.to_string();
+        source = s.source();
+    }
+    let kind = if e.is_timeout() { "quá thời gian chờ" } else if e.is_connect() { "không kết nối được" } else { "mất kết nối giữa chừng" };
+    format!("Mất kết nối tới SonicVoice ({kind}: {detail})")
+}
+
+/// Gửi request, thử lại tối đa 3 lần khi rớt mạng.
+/// `idempotent = false` (tạo job): chỉ thử lại khi chưa kết nối được, vì khi đó chắc chắn Sonic chưa nhận request.
+async fn send_with_retry(req: reqwest::RequestBuilder, idempotent: bool) -> Result<reqwest::Response, String> {
+    let mut last = String::new();
+    for attempt in 0..3u64 {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(1500 * attempt)).await;
+        }
+        let Some(r) = req.try_clone() else {
+            return req.send().await.map_err(|e| describe_net_error(&e));
+        };
+        match r.send().await {
+            Ok(resp) if idempotent && resp.status().is_server_error() && attempt < 2 => {
+                last = format!("SonicVoice HTTP {}", resp.status().as_u16());
+            }
+            Ok(resp) => return Ok(resp),
+            Err(e) => {
+                last = describe_net_error(&e);
+                if !(idempotent || e.is_connect()) {
+                    break;
+                }
+            }
+        }
+    }
+    Err(last)
+}
+
+/// Tải file (audio/artifact), thử lại khi rớt mạng, lỗi 5xx hoặc đứt giữa lúc đọc dữ liệu.
+async fn fetch_bytes(req: reqwest::RequestBuilder) -> Result<(String, Vec<u8>), String> {
+    let mut last = String::from("Không gửi được request.");
+    for attempt in 0..3u64 {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(1500 * attempt)).await;
+        }
+        let Some(r) = req.try_clone() else { break };
+        match r.send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let content_type = resp.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                match resp.bytes().await {
+                    Ok(bytes) => return Ok((content_type, bytes.to_vec())),
+                    Err(e) => last = describe_net_error(&e),
+                }
+            }
+            Ok(resp) if resp.status().is_server_error() => last = format!("SonicVoice HTTP {}", resp.status().as_u16()),
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                let detail = resp.text().await.unwrap_or_default();
+                return Err(format!("SonicVoice HTTP {status}: {}", detail.chars().take(300).collect::<String>()));
+            }
+            Err(e) => last = describe_net_error(&e),
+        }
+    }
+    Err(last)
 }
 
 fn now_s() -> u64 {

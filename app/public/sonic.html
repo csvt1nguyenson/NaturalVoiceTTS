@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NaturalVoice / SonicVoice</title>
+    <link rel="icon" href="icon.png" />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="h-screen overflow-hidden bg-canvas font-sans text-base text-ink antialiased" style="color-scheme: dark">
+    <div class="grid h-full grid-rows-[44px_1fr_28px]">
+      <header class="flex items-center justify-between border-b border-line bg-surface px-4">
+        <div class="flex items-center gap-3">
+          <button id="switchProvider" type="button" class="btn btn-sm" title="Đổi dịch vụ" aria-label="Quay lại chọn dịch vụ">&#8592;</button>
+          <strong class="text-[15px] font-semibold">NaturalVoice</strong>
+          <span class="text-xs text-ink-3">Text &amp; subtitle sang giọng nói qua SonicVoice</span>
+        </div>
+        <span id="status" class="pill pill-queued">Chưa kết nối</span>
+      </header>
+
+      <div class="grid min-h-0 grid-cols-[320px_1fr]">
+        <aside class="min-h-0 overflow-y-auto border-r border-line bg-surface">
+          <section class="side-section">
+            <h2>SonicVoice API</h2>
+            <div class="space-y-2.5">
+              <label class="field"><span>API key</span><input id="sonicKey" class="input font-mono text-xs" type="password" placeholder="wp_..." autocomplete="off" /></label>
+              <div class="flex gap-1.5"><button id="saveKey" class="btn btn-primary flex-1 justify-center">Lưu và kết nối</button><button id="clearKey" class="btn">Xoá key</button></div>
+              <p id="balance" class="text-xs text-ink-3">Số dư: -</p>
+            </div>
+          </section>
+
+          <section class="side-section">
+            <h2>Voice</h2>
+            <div class="space-y-2.5">
+              <label class="field"><span>Nhà cung cấp</span><select id="provider" class="input"><option value="eleven" selected>ElevenLabs</option><option value="mini">MiniMax</option></select></label>
+              <div class="field"><span>Tên voice</span><div class="flex gap-1.5"><input id="voiceSearch" class="input" placeholder="Tìm tên voice" /><button id="searchVoice" class="btn">Tìm</button></div></div>
+              <div class="grid grid-cols-2 gap-2">
+                <label class="field"><span>Lọc giọng theo ngôn ngữ</span><select id="voiceLanguage" class="input"><option value="">Tất cả</option><option value="vi">Tiếng Việt</option><option value="en">English</option><option value="zh">Chinese</option><option value="ja">Japanese</option><option value="ko">Korean</option></select></label>
+                <label class="field"><span>Giới tính</span><select id="voiceGender" class="input"><option value="">Tất cả</option><option value="female">Nữ</option><option value="male">Nam</option><option value="neutral">Trung tính</option></select></label>
+              </div>
+              <label class="field"><span>Giọng đọc</span><select id="voice" class="input"><option value="">Chọn voice</option></select></label>
+              <div class="flex items-center gap-1.5"><button id="voicePrev" class="btn btn-sm" title="Trang trước" aria-label="Trang voice trước">&#8592;</button><span id="voicePageInfo" class="flex-1 text-center text-xs text-ink-3">-</span><button id="voiceNext" class="btn btn-sm" title="Trang sau" aria-label="Trang voice sau">&#8594;</button></div>
+              <label class="field"><span>Voice ID đang dùng</span><input id="voiceId" class="input font-mono text-xs" placeholder="Chọn voice hoặc dán ID" /></label>
+              <p id="voiceMeta" class="text-xs text-ink-3">Chưa chọn voice.</p>
+              <div class="grid grid-cols-2 gap-2">
+                <label class="field"><span>Model</span><select id="model" class="input"><option value="">Mặc định</option></select></label>
+                <label class="field"><span>Ngôn ngữ đọc</span><select id="language" class="input"><option value="">Tự nhận diện</option></select></label>
+              </div>
+            </div>
+          </section>
+
+          <section class="side-section border-b-0">
+            <h2>Tuỳ chỉnh giọng</h2>
+            <div class="grid grid-cols-2 gap-2">
+              <label class="field"><span>Tốc độ</span><input id="speed" class="input" type="number" min="0.5" max="2" step="0.05" value="1" /></label>
+            </div>
+            <p id="speedHint" class="mt-1.5 text-xs text-ink-3">MiniMax: 0.5-2</p>
+            <div id="elevenSettings" class="mt-2.5 space-y-2.5" hidden>
+              <div class="grid grid-cols-2 gap-2">
+                <label class="field"><span>Stability (0-1)</span><input id="stability" class="input" type="number" min="0" max="1" step="0.05" value="0.5" /></label>
+                <label class="field"><span>Similarity (0-1)</span><input id="similarity" class="input" type="number" min="0" max="1" step="0.05" value="0.75" /></label>
+                <label class="field"><span>Style (0-1)</span><input id="style" class="input" type="number" min="0" max="1" step="0.05" value="0" /></label>
+              </div>
+              <label class="check"><input id="boost" type="checkbox" checked /> Speaker boost</label>
+            </div>
+          </section>
+        </aside>
+
+        <main class="grid min-h-0 grid-rows-[auto_1fr_auto] gap-3 overflow-hidden p-3">
+          <section class="panel">
+            <div class="flex min-h-10 flex-wrap items-center justify-between gap-2 border-b border-line px-3 py-1.5">
+              <h2 class="whitespace-nowrap">Batch Job</h2>
+              <div class="flex min-w-0 flex-wrap items-center gap-1.5">
+                <input id="folderPath" class="input w-[420px] max-w-full" placeholder="Đường dẫn thư mục chứa .txt, hoặc bấm ... để chọn" />
+                <button id="chooseFolder" class="btn" title="Chọn thư mục">...</button>
+                <button id="scanFolder" class="btn">Quét thư mục</button>
+                <button id="clearQueue" class="btn">Xoá danh sách</button>
+                <span class="mx-1 h-5 w-px bg-line"></span>
+                <button id="run" class="btn btn-primary">Chạy hàng loạt</button>
+                <button id="batchStop" class="btn btn-danger">Stop</button>
+              </div>
+            </div>
+            <div class="max-h-[132px] overflow-y-auto">
+              <table class="w-full table-fixed border-collapse">
+                <colgroup><col class="w-10" /><col /><col class="w-20" /><col class="w-32" /><col class="w-[38%]" /></colgroup>
+                <thead><tr><th class="th">#</th><th class="th">File</th><th class="th">Dòng</th><th class="th">Trạng thái</th><th class="th">Thư mục output</th></tr></thead>
+                <tbody id="batchRows"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel grid min-h-0 grid-rows-[auto_1fr]">
+            <div class="border-b border-line">
+              <div class="flex h-10 items-center justify-between gap-2 px-3">
+                <h2 class="truncate text-sm font-semibold text-ink">Subtitles <span id="summary" class="ml-1 font-normal text-ink-3">Chưa có dòng nào</span></h2>
+                <div class="flex shrink-0 items-center gap-1.5"><button id="retry" class="btn">Chạy lại lỗi</button><button id="start" class="btn btn-primary">Start</button><button id="stop" class="btn btn-danger">Stop</button></div>
+              </div>
+              <div class="flex flex-wrap items-center gap-1.5 border-t border-line/70 bg-canvas/40 px-3 py-1.5">
+                <button id="importFile" class="btn btn-sm">Nhập file .txt/.srt</button>
+                <button id="importFolder" class="btn btn-sm">Nhập thư mục</button>
+                <span class="mx-1 h-4 w-px bg-line"></span>
+                <button id="openOutput" class="btn btn-sm">Mở thư mục output</button>
+                <span class="ml-auto text-xs text-ink-3">Batch Job dùng thư mục .txt phía trên</span>
+              </div>
+            </div>
+            <div class="min-h-0 overflow-y-auto">
+              <table class="w-full table-fixed border-collapse">
+                <colgroup><col class="w-10" /><col class="w-14" /><col /><col class="w-36" /><col class="w-28" /></colgroup>
+                <thead><tr><th class="th">#</th><th class="th">Part</th><th class="th">Text</th><th class="th">Trạng thái</th><th class="th">Output</th></tr></thead>
+                <tbody id="rows"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel">
+            <details open>
+              <summary class="flex h-9 cursor-pointer select-none items-center justify-between px-3 text-sm font-semibold marker:content-none"><span>Log</span><span class="flex items-center gap-2"><button id="openLogFile" type="button" class="btn btn-sm h-6 font-normal" title="Mở file log của hôm nay">Mở file log</button><span id="logCount" class="text-xs font-normal text-ink-3">0 dòng</span></span></summary>
+              <pre id="log" class="m-0 h-[120px] overflow-y-auto border-t border-line px-3 py-2 font-mono text-xs leading-[18px] text-ink-2 whitespace-pre-wrap"></pre>
+            </details>
+          </section>
+        </main>
+      </div>
+
+      <footer class="flex items-center gap-3 border-t border-line bg-surface px-4 text-xs text-ink-2">
+        <span id="statusLabel" class="font-medium text-ink">Sẵn sàng</span>
+        <div class="h-1.5 w-64 overflow-hidden rounded-full bg-raised"><div id="statusBar" class="h-full w-0 bg-brand transition-[width]"></div></div>
+        <span id="statusLines">0 / 0 dòng</span><span class="text-ink-3">·</span><span id="statusFiles">File 0 / 0</span>
+        <span id="statusOutput" class="ml-auto truncate text-ink-3"></span>
+      </footer>
+    </div>
+    <script src="sonic.js"></script>
+  </body>
+</html>

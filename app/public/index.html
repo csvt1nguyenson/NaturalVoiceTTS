@@ -8,12 +8,21 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body class="h-screen overflow-hidden bg-canvas font-sans text-base text-ink antialiased" style="color-scheme: dark">
+    <div id="providerChooser" style="position:fixed;inset:0;z-index:100;background:#10151d;display:flex;align-items:center;justify-content:center">
+      <div style="width:min(420px,90vw);color:#e5e7eb">
+        <h1 style="font-size:22px;font-weight:700;margin-bottom:8px">NaturalVoice</h1>
+        <p style="color:#9ca3af;margin-bottom:22px">Chọn dịch vụ tạo giọng để bắt đầu</p>
+        <button id="chooseAivie" class="btn btn-primary" style="width:100%;justify-content:center;margin-bottom:10px">AIVIE</button>
+        <button id="chooseSonic" class="btn" style="width:100%;justify-content:center">SonicVoice</button>
+      </div>
+    </div>
     <div class="grid h-full grid-rows-[44px_1fr_28px]">
 
       <!-- Thanh tiêu đề -->
       <header class="flex items-center justify-between border-b border-line bg-surface px-4">
         <div class="flex items-baseline gap-3">
-          <span class="text-[15px] font-semibold tracking-tight">NaturalVoice</span>
+          <button id="backToProviders" type="button" class="btn btn-sm" title="Đổi dịch vụ" aria-label="Quay lại chọn dịch vụ">&#8592;</button>
+          <button id="changeProvider" class="text-[15px] font-semibold tracking-tight" title="Chọn dịch vụ khác">NaturalVoice</button>
           <span id="appVersion" class="text-xs text-ink-3"></span>
           <span class="text-xs text-ink-3">Text &amp; subtitle sang giọng nói qua AIVIE</span>
         </div>
@@ -69,6 +78,7 @@
                   <select id="model" class="input">
                     <optgroup label="Trọn gói AIVIE">
                       <option value="eleven_v3" selected>Eleven v3</option>
+                      <option value="eleven_v3_b">Eleven v3 (AIVIE B)</option>
                       <option value="eleven_v4">Eleven v4</option>
                       <option value="eleven_v4_turbo">Eleven v4 Turbo</option>
                       <option value="eleven_multilingual_v2">Multilingual v2</option>
@@ -247,7 +257,7 @@
             <details open>
               <summary class="flex h-9 cursor-pointer select-none items-center justify-between px-3 text-sm font-semibold marker:content-none">
                 <span>Log</span>
-                <span id="logCount" class="text-xs font-normal text-ink-3">0 dòng</span>
+                <span class="flex items-center gap-2"><button id="openLogFile" type="button" class="btn btn-sm h-6 font-normal" title="Mở file log của hôm nay">Mở file log</button><span id="logCount" class="text-xs font-normal text-ink-3">0 dòng</span></span>
               </summary>
               <pre id="log" class="m-0 h-[120px] overflow-y-auto border-t border-line px-3 py-2 font-mono text-xs leading-[18px] text-ink-2 whitespace-pre-wrap"></pre>
             </details>

@@ -51,9 +51,28 @@ function appendLog(text, cls = "") {
   while (el.childNodes.length > 800) el.removeChild(el.firstChild);
   logLines += 1;
   if ($("logCount")) $("logCount").textContent = `${logLines} dòng`;
+  queueLogFile(`[AIVIE] ${text}`);
   el.scrollTop = el.scrollHeight;
 }
-const log = (message) => appendLog(`[${new Date().toLocaleTimeString()}] ${message}`, /lỗi|error|failed/i.test(String(message)) ? "log-error" : "");
+const log = (message) => appendLog(`[${new Date().toLocaleTimeString("vi-VN")}] ${message}`, /lỗi|error|failed/i.test(String(message)) ? "log-error" : "");
+// ---------- Log ghi ra file theo ngày (Documents\NaturalVoice\logs) ----------
+const logFile = { queue: [], timer: 0 };
+function localDate() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function queueLogFile(line) {
+  logFile.queue.push(line);
+  if (!logFile.timer) logFile.timer = setTimeout(flushLogFile, 400);
+}
+async function flushLogFile() {
+  logFile.timer = 0;
+  const lines = logFile.queue.splice(0);
+  if (!lines.length) return;
+  try { await apiFetch("/api/log-append", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ date: localDate(), lines }) }); } catch {}
+}
+queueLogFile(`===== [AIVIE] Mở NaturalVoice ${localDate()} ${new Date().toLocaleTimeString("vi-VN")} =====`);
+
 
 let lastServerLogIndex = 0;
 async function pollServerLogs() {
@@ -244,6 +263,40 @@ function voiceModels(voice) {
   return [];
 }
 
+async function resolveLibraryVoice(voice) {
+  const id = voiceId(voice);
+  if (!id) return voice;
+  try {
+    const search = voice.name && voice.name !== id ? voice.name : "";
+    for (let page = 0; page < 20; page += 1) {
+      const data = await callMcpTool("list_voices", { search, page, page_size: 50 });
+      const found = (data.voices || []).find((item) => voiceId(item) === id);
+      if (found) return found;
+      if (!data.has_more) break;
+    }
+    return voice;
+  } catch (error) {
+    log(`Không kiểm tra được model library cho ${id}: ${error.message}`);
+    return voice;
+  }
+}
+
+async function validateVoiceModel() {
+  if (!isAivieTtsTool()) return true;
+  const id = $("voiceId").value.trim();
+  if (!id) { log("Chưa chọn Voice ID."); return false; }
+  const current = $("model").value;
+  if (current.startsWith("el_") || current.startsWith("dv_")) return true;
+  const voice = await resolveLibraryVoice({ id, name: $("voiceName").value.trim() });
+  if (!voice.models?.length) {
+    log(`Voice ${id} không có trong AIVIE Library hoặc chưa có model khả dụng. Hãy thêm voice vào Library trước khi chạy.`);
+    return false;
+  }
+  applyVoice(voice);
+  log(`Đã kiểm tra model cho ${voice.name}: ${$("model").value}.`);
+  return true;
+}
+
 async function showDirectVoiceId(voiceIdValue) {
   $("voiceId").value = voiceIdValue;
   try {
@@ -252,7 +305,7 @@ async function showDirectVoiceId(voiceIdValue) {
     const data = await callMcpTool("search_voice_library", { search: voiceIdValue, page_size: 10 });
     const found = (data.voices || []).find((voice) => voiceId(voice) === voiceIdValue);
     if (found) {
-      renderVoiceResults([found]);
+      renderVoiceResults([await resolveLibraryVoice(found)]);
       log(`Đã nhận voice ID và tên: ${found.name} (${voiceIdValue})`);
       return;
     }
@@ -261,10 +314,10 @@ async function showDirectVoiceId(voiceIdValue) {
   log(`Đã nhận voice ID trực tiếp: ${voiceIdValue}`);
 }
 
-function applySelectedVoice() {
+async function applySelectedVoice() {
   const voice = state.voiceResults[Number($("voiceResults").value)];
   if (!voice) return;
-  applyVoice(voice);
+  applyVoice(await resolveLibraryVoice(voice));
 }
 
 function applyVoice(voice) {
@@ -274,7 +327,20 @@ function applyVoice(voice) {
   // AIVIE: model đầu tiên trong danh sách là mặc định tương thích với voice.
   if (models.length) {
     const current = $("model").value;
-    $("model").value = models.includes(current) ? current : models[0];
+    let group = $("model").querySelector("#libraryModels");
+    if (!group) {
+      group = document.createElement("optgroup");
+      group.id = "libraryModels";
+      group.label = "Model của voice trong AIVIE Library";
+      $("model").prepend(group);
+    }
+    group.replaceChildren(...models.filter((model) => !Array.from($("model").querySelectorAll("optgroup:not(#libraryModels) option")).some((option) => option.value === model))
+      .map((model) => new Option(model, model)));
+    if (!current.startsWith("el_") && !current.startsWith("dv_")) {
+      $("model").value = models.find((model) => model === current)
+        || models.find((model) => model === `${current}_b`)
+        || models[0];
+    }
   }
   const gender = voice.gender === "male" ? "nam" : voice.gender === "female" ? "nữ" : voice.gender || "";
   const meta = [voice.language ? `Ngôn ngữ gốc <strong class="font-medium text-ink-2">${escapeHtml(voice.language)}</strong>` : "", gender, models.length ? `chạy được ${escapeHtml(models.join(", "))}` : ""].filter(Boolean).join(" · ");
@@ -294,6 +360,7 @@ async function searchVoiceLibrary() {
     ...( $("language").value && $("language").value !== "auto" ? { language: $("language").value } : {} )
   });
   renderVoiceResults(data.voices || []);
+  if (data.voices?.length) applyVoice(await resolveLibraryVoice(data.voices[0]));
   log(`Search voice library: ${(data.voices || []).length}/${data.total ?? "?"} kết quả.`);
 }
 
@@ -1034,6 +1101,7 @@ async function runPool(queue, label) {
 async function startQueue() {
   if (state.running) return log("Đang có queue chạy, bỏ qua lần bấm trùng.");
   if (!$("toolSelect").value) return log("Chưa kết nối AIVIE.");
+  if (!await validateVoiceModel()) return;
   if (state.activeSource) normalizeSourceItems(state.activeSource);
   const queue = visibleItems();
   if (!queue.length) return log("Subtitles chưa có dòng nào để chạy.");
@@ -1060,6 +1128,7 @@ async function startQueue() {
 async function runBatchJobs() {
   if (state.running) return log("Batch Job đang chạy, bỏ qua lần bấm trùng.");
   if (!$("toolSelect").value) return log("Chưa kết nối AIVIE.");
+  if (!await validateVoiceModel()) return;
   if (!state.batchFiles.length) return log("Batch Job chưa có file nào.");
   state.running = true; state.batchMode = true;
   updateStatusBar();
@@ -1276,6 +1345,11 @@ $("importFileBtn").addEventListener("click", () => pickAndImportSingle("single")
 $("importFolderBtn").addEventListener("click", () => pickAndImportSingle("folder").then((handled) => { if (!handled) $("singleFolderInput").click(); }).catch((e) => log(e.message)));
 $("importVoiceBtn").addEventListener("click", () => log("Import Voice sẽ dùng khi có file voice library/template. Hiện chưa cần cho queue TTS."));
 $("openOutputBtn").addEventListener("click", openOutput);
+$("openLogFile")?.addEventListener("click", (event) => {
+  event.preventDefault(); event.stopPropagation();
+  flushLogFile().then(() => apiFetch("/api/log-open", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ date: localDate() }) }))
+    .then((r) => r.json()).then((d) => { if (d.error) log(d.error); }).catch((e) => log(e.message));
+});
 $("clearBtn").addEventListener("click", () => {
   if (state.running) return log("Đang chạy, hãy Stop trước khi xoá danh sách.");
   state.items = [];
@@ -1392,5 +1466,19 @@ async function bootConnection() {
   setConnection("err", "Không kết nối được backend");
   $("keyHint").textContent = "Backend chưa chạy. Hãy đóng app và mở lại.";
 }
-bootConnection();
+let aivieBooted = false;
+const openProviderChooser = () => {
+  if (state.running) return log("Đang tạo voice. Hãy bấm Stop trước khi đổi dịch vụ.");
+  $("providerChooser").style.display = "flex";
+};
+$("chooseAivie").addEventListener("click", () => {
+  $("providerChooser").style.display = "none";
+  if (!aivieBooted) { aivieBooted = true; bootConnection(); }
+});
+$("chooseSonic").addEventListener("click", () => {
+  if (state.running) return log("Đang tạo voice. Hãy bấm Stop trước khi đổi dịch vụ.");
+  window.location.href = "sonic.html";
+});
+$("backToProviders").addEventListener("click", openProviderChooser);
+$("changeProvider").addEventListener("click", openProviderChooser);
 setTimeout(() => checkForUpdate(false), 3000);

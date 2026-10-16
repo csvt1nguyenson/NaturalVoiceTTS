@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { readFile, mkdir, writeFile, readdir, stat, unlink } from "node:fs/promises";
+import { readFile, mkdir, writeFile, readdir, stat, unlink, appendFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import path from "node:path";
@@ -775,6 +775,21 @@ const server = createServer(async (req, res) => {
       const fullPath = path.join(outputDir, safe);
       await writeFile(fullPath, text || "", "utf8");
       return json(res, 200, { fullPath, filename: safe });
+    }
+    if (req.method === "POST" && (url.pathname === "/api/log-append" || url.pathname === "/api/log-open")) {
+      const { date, lines } = await readJson(req);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ""))) throw new Error("Ngày của file log không hợp lệ.");
+      const dir = path.join(outputDir, "logs");
+      await mkdir(dir, { recursive: true });
+      const file = path.join(dir, `NaturalVoice-${date}.log`);
+      if (url.pathname === "/api/log-append") {
+        const list = (Array.isArray(lines) ? lines : []).map((l) => String(l).replace(/[\r\n]+/g, " "));
+        if (list.length) await appendFile(file, list.join("\r\n") + "\r\n", "utf8");
+        return json(res, 200, { path: file, written: list.length });
+      }
+      if (!existsSync(file)) await writeFile(file, "", "utf8");
+      spawn("explorer.exe", [file], { detached: true, stdio: "ignore", windowsHide: true }).unref();
+      return json(res, 200, { path: file });
     }
     if (req.method === "POST" && url.pathname === "/api/join") {
       return json(res, 200, await joinMp3AndCreateSrt(await readJson(req)));
