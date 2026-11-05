@@ -1469,44 +1469,6 @@ $("dropZone").addEventListener("drop", (e) => {
 });
 
 
-// ---------- Auto update (desktop) ----------
-async function checkForUpdate(manual = false) {
-  const updater = TAURI?.updater;
-  if (!updater?.check) { if (manual) log("Kiểm tra cập nhật chỉ có trên bản desktop."); return; }
-  try {
-    if (TAURI?.app?.getVersion && $("appVersion")) $("appVersion").textContent = `v${await TAURI.app.getVersion()}`;
-    const update = await updater.check();
-    if (!update) { if (manual) log("Đang dùng phiên bản mới nhất."); return; }
-    $("updateVersion").textContent = `Phiên bản ${update.version}${update.date ? ` · ${String(update.date).slice(0, 10)}` : ""}`;
-    $("updateNotes").textContent = "Có bản cập nhật mới. Bấm Cập nhật ngay để tải và cài đặt, app sẽ tự mở lại.";
-    $("updateModal").classList.remove("hidden"); $("updateModal").classList.add("flex");
-    $("updateNowBtn").onclick = async () => {
-      $("updateNowBtn").disabled = true; $("updateLaterBtn").disabled = true;
-      $("updateProgress").classList.remove("hidden");
-      let total = 0; let got = 0;
-      try {
-        await update.downloadAndInstall((event) => {
-          if (event.event === "Started") total = event.data.contentLength || 0;
-          else if (event.event === "Progress") {
-            got += event.data.chunkLength;
-            const pct = total ? Math.round((got / total) * 100) : 0;
-            $("updateBar").style.width = `${pct}%`;
-            $("updateProgressText").textContent = total ? `Đang tải ${pct}%` : `Đã tải ${(got / 1048576).toFixed(1)} MB`;
-          } else if (event.event === "Finished") $("updateProgressText").textContent = "Đang cài đặt…";
-        });
-        await TAURI.process.relaunch();
-      } catch (error) {
-        log(`Cập nhật lỗi: ${error.message || error}`);
-        $("updateProgressText").textContent = `Lỗi: ${error.message || error}`;
-        $("updateNowBtn").disabled = false; $("updateLaterBtn").disabled = false;
-      }
-    };
-    $("updateLaterBtn").onclick = () => { $("updateModal").classList.add("hidden"); $("updateModal").classList.remove("flex"); };
-  } catch (error) {
-    if (manual) log(`Không kiểm tra được cập nhật: ${error.message || error}`);
-  }
-}
-
 async function bootConnection() {
   if ($("advancedFields")) $("advancedFields").hidden = true;
   setConnection("off", "Chưa kết nối");
@@ -1555,4 +1517,3 @@ $("chooseSonic").addEventListener("click", () => {
 });
 $("backToProviders").addEventListener("click", openProviderChooser);
 $("changeProvider").addEventListener("click", openProviderChooser);
-setTimeout(() => checkForUpdate(false), 3000);
