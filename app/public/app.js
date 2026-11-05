@@ -752,6 +752,48 @@ async function clearKey() {
   log("Đã xoá API key đã lưu.");
 }
 
+// AIVIE báo v3/v4 tạm bảo trì (job.model_v2_only, chưa trừ credit): hỏi một lần, đồng ý thì gửi lại với accept_v2.
+// Các dòng chạy song song gặp cùng lỗi thì chờ chung một popup. Đồng ý được nhớ tới khi đóng app.
+let acceptV2 = false;
+let v2Prompt = null;
+function isV2OnlyError(error) { return /model_v2_only|accept_v2|bằng v2/i.test(String(error?.message || error)); }
+function askAcceptV2(message) {
+  if (acceptV2) return Promise.resolve(true);
+  if (!state.running) return Promise.resolve(false);
+  if (!v2Prompt) v2Prompt = new Promise((resolve) => {
+    $("v2Message").textContent = message;
+    const close = (ok) => {
+      $("v2Modal").classList.add("hidden"); $("v2Modal").classList.remove("flex");
+      v2Prompt = null;
+      if (ok) { acceptV2 = true; log("Đã đồng ý render bằng Multilingual v2 trong lúc v3/v4 bảo trì."); }
+      else { state.running = false; updateStatusBar(); log("Không đồng ý render bằng v2, đã dừng. Chạy lại sau hoặc đổi model/giọng khác."); }
+      resolve(ok);
+    };
+    $("v2OkBtn").onclick = () => close(true);
+    $("v2CancelBtn").onclick = () => close(false);
+    $("v2Modal").classList.remove("hidden"); $("v2Modal").classList.add("flex");
+  });
+  return v2Prompt;
+}
+// Gọi /api/start-render. Idempotency key lưu ở holder[keyName]; khi có accept_v2 dùng key riêng vì nội dung gửi đã khác.
+async function startRender(body, holder, keyName) {
+  const send = async () => {
+    const k = acceptV2 ? `${keyName}V2` : keyName;
+    body.args.idempotency_key = holder[k] || (holder[k] = crypto.randomUUID());
+    if (acceptV2) body.args.accept_v2 = true;
+    const res = await apiFetch("/api/start-render", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || "Start render failed");
+    return data;
+  };
+  try { return await send(); }
+  catch (error) {
+    if (!isV2OnlyError(error) || body.args.accept_v2) throw error;
+    if (!await askAcceptV2(error.message)) throw new Error("Không đồng ý render bằng v2 (v3/v4 đang bảo trì).");
+    return await send();
+  }
+}
+
 async function callTool(item, index) {
   if (!state.batchMode) state.activeSource = item.source;
   item.status = "Creating job";
@@ -766,19 +808,12 @@ async function callTool(item, index) {
       if (maxCredits > 0 && credits > maxCredits) throw new Error("Estimate vượt Max credits.");
       log("Estimate dòng " + (item.part || index + 1) + ": " + (credits || "?") + " credits.");
     }
-    renderArgs.idempotency_key = item.idempotencyKey || (item.idempotencyKey = crypto.randomUUID());
-    const startResponse = await apiFetch("/api/start-render", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        args: renderArgs,
-        fileBaseName: `item-${index + 1}`,
-        outputFolder: item.outputFolder || "single-import",
-        clipNumber: item.part || index + 1
-      })
-    });
-    const started = await startResponse.json();
-    if (!startResponse.ok || started.error) throw new Error(started.error || "Start render failed");
+    const started = await startRender({
+      args: renderArgs,
+      fileBaseName: `item-${index + 1}`,
+      outputFolder: item.outputFolder || "single-import",
+      clipNumber: item.part || index + 1
+    }, item, "idempotencyKey");
     item.jobId = started.jobId;
     item.status = "Waiting AIVIE";
     log(`AIVIE job ${started.jobId}: queued`);
@@ -974,16 +1009,10 @@ async function renderWholeFile(items, label) {
   }
   // Đổi tool thì dùng key khác, để AIVIE không trả lại job cũ của tool kia.
   const keyName = useLines ? "linesJobKey" : "fileJobKey";
-  args.idempotency_key = first[keyName] || (first[keyName] = crypto.randomUUID());
   for (const item of items) item.status = "Creating job";
   renderBatchFiles(); renderRows();
   const outputFolder = parentFolderOf(first.outputFolder) || first.outputFolder || "single-import";
-  const res = await apiFetch("/api/start-render", {
-    method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ tool: useLines ? "create_lines_job" : "create_tts_job", args, outputFolder, clipNumber: `${base}_full`, fileBaseName: base })
-  });
-  const started = await res.json();
-  if (!res.ok || started.error) throw new Error(started.error || "Start render failed");
+  const started = await startRender({ tool: useLines ? "create_lines_job" : "create_tts_job", args, outputFolder, clipNumber: `${base}_full`, fileBaseName: base }, first, keyName);
   log(`AIVIE ${useLines ? "lines job" : "job"} ${started.jobId}: cả file ${label} (${items.length} dòng, ${fullText.length} ký tự), queued`);
   for (const item of items) { item.status = "Waiting AIVIE"; item.jobId = started.jobId; }
   renderBatchFiles(); renderRows();

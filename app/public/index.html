@@ -304,6 +304,23 @@
         </div>
       </div>
     </div>
+
+    <!-- Popup AIVIE báo v3/v4 bảo trì, chỉ render được bằng v2 -->
+    <div id="v2Modal" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/60 p-4">
+      <div class="w-full max-w-md rounded-lg border border-line bg-surface shadow-2xl">
+        <div class="border-b border-line px-5 py-3">
+          <h2 class="text-sm font-semibold text-ink">Render bằng Multilingual v2?</h2>
+        </div>
+        <div class="px-5 py-3 text-sm text-ink-2">
+          <p id="v2Message"></p>
+          <p class="mt-2.5 text-xs text-ink-3">Đồng ý: áp dụng cho mọi dòng còn lại tới khi đóng app; audio tag như [pause] sẽ bị bỏ vì v2 đọc thành tiếng. Huỷ: dừng lần chạy này.</p>
+        </div>
+        <div class="flex justify-end gap-2 border-t border-line px-5 py-3">
+          <button id="v2CancelBtn" class="btn">Huỷ</button>
+          <button id="v2OkBtn" class="btn btn-primary">Đồng ý</button>
+        </div>
+      </div>
+    </div>
     <script src="app.js"></script>
   </body>
 </html>
