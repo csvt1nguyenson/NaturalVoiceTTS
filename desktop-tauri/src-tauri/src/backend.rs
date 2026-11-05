@@ -310,7 +310,11 @@ impl Backend {
                     self.log(format!("Key {} không hợp lệ hoặc đã thu hồi, bỏ qua.", key_label(&key)));
                 }
                 Err(e) => {
-                    self.release_key(&key);
+                    // AIVIE vẫn tính lượt cho lần tạo job bị từ chối (vd model_v2_only), nên chỉ trả lượt khi chưa tới được AIVIE.
+                    if !reached_aivie(&e) {
+                        self.release_key(&key);
+                    }
+                    let _ = self.save_config();
                     return Err(e);
                 }
             }
@@ -1231,6 +1235,11 @@ fn is_rate_limit(msg: &str) -> bool {
     m.contains("quá nhanh") || m.contains("rate_limited") || m.contains("rate limit") || m.contains("http 429")
 }
 
+/// Lỗi "MCP request lỗi" nghĩa là request chưa gửi được (mất mạng, timeout); lỗi khác đều do AIVIE trả về.
+fn reached_aivie(msg: &str) -> bool {
+    !msg.starts_with("MCP request lỗi")
+}
+
 fn parse_retry_secs(msg: &str) -> Option<u64> {
     let re = Regex::new(r"(\d+)\s*(giây|seconds?|sec|s)").unwrap();
     re.captures(msg).and_then(|c| c[1].parse().ok())
@@ -1475,6 +1484,14 @@ mod tests {
     fn switches_key_at_59() {
         assert_eq!(JOBS_USABLE, 59);
         assert!(JOBS_USABLE < JOBS_PER_HOUR);
+    }
+
+    #[test]
+    fn refused_create_still_counts() {
+        // AIVIE từ chối (bảo trì v3/v4, lỗi HTTP) vẫn tính lượt; chỉ lỗi mạng mới trả lượt.
+        assert!(reached_aivie("V3 và V4 đang được nguồn ElevenLabs bảo trì, nên giọng sẽ được render bằng v2. Nhấn Đồng ý để tiếp tục."));
+        assert!(reached_aivie("MCP HTTP 409: job.model_v2_only"));
+        assert!(!reached_aivie("MCP request lỗi: error sending request for url"));
     }
 
     #[test]
