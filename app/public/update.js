@@ -1,4 +1,4 @@
-// ---------- Auto update (desktop), dùng chung cho trang AIVIE và Sonic ----------
+// ---------- Auto update (desktop) ----------
 // Kiểm tra lúc mở app và mỗi 30 phút khi app đang mở. Đang chạy batch thì chờ xong mới hiện popup,
 // vì "Cập nhật ngay" sẽ khởi động lại app. Bấm "Để sau" thì không nhắc lại bản đó tới lần mở app sau.
 const UPDATE_CHECK_EVERY_MS = 30 * 60 * 1000;

@@ -1053,7 +1053,25 @@ function assignTimingsByLength(items, totalSeconds) {
 }
 
 // Chạy nhiều "task" (mỗi task là 1 file) song song, tôn trọng pausedUntil và delay giữa 2 lần tạo job.
+// "Tự chạy lại khi lỗi": đưa lại về cuối hàng đợi, suất nào rảnh thì chạy. Tối đa 3 lần để không đốt quota.
+const MAX_AUTO_RETRY = 3;
+function retryLater(target) {
+  if (!$("loopMode")?.checked || !state.running) return false;
+  target.autoRetries = (target.autoRetries || 0) + 1;
+  if (target.autoRetries > MAX_AUTO_RETRY) return false;
+  if (target.status === "Error") { target.status = "Queued"; target.error = ""; }
+  log(`Tự chạy lại lần ${target.autoRetries}/${MAX_AUTO_RETRY}: ${target.label || `${target.fileName} dòng ${target.part}`}`);
+  return true;
+}
+
+// Nhớ 2 tuỳ chọn giữa các lần mở app.
+for (const id of ["autoSrt", "loopMode"]) {
+  try { const v = localStorage.getItem(`nv.${id}`); if (v !== null) $(id).checked = v === "1"; } catch {}
+  $(id).addEventListener("change", () => { try { localStorage.setItem(`nv.${id}`, $(id).checked ? "1" : "0"); } catch {} });
+}
+
 async function runFilePool(groups) {
+  groups.forEach((g) => { g.autoRetries = 0; });
   let cursor = 0; let ok = 0; let failed = 0;
   const worker = async () => {
     while (state.running) {
@@ -1067,6 +1085,7 @@ async function runFilePool(groups) {
       } catch (error) {
         for (const item of g.items) { item.status = isRateLimitError(error) ? "Queued" : "Error"; item.error = error.message; }
         if (isRateLimitError(error)) { applyRateLimit(error); groups.push(g); }
+        else if (retryLater(g)) { g.items.forEach((item) => { item.status = "Queued"; }); log(`${g.label}: ${error.message}`); groups.push(g); }
         else { failed += 1; log(`${g.label}: ${error.message}`); }
         renderBatchFiles(); renderRows();
       }
@@ -1095,9 +1114,10 @@ async function throttleCreate() {
   if (at > now) await sleep(at - now);
 }
 
-async function runPool(queue, label) {
+async function runPool(queue, label, onItemDone) {
   const pending = queue.filter((item) => item.status === "Queued" || item.status === "Error");
   if (!pending.length) return { ok: 0, failed: 0 };
+  pending.forEach((item) => { item.autoRetries = 0; });
   let cursor = 0; let ok = 0; let failed = 0; const fatal = false;
   const worker = async () => {
     while (state.running) {
@@ -1108,14 +1128,18 @@ async function runPool(queue, label) {
         if (!state.running) { item.status = "Queued"; return; }
         await callTool(item, item.part || 1);
         ok += 1;
+        onItemDone?.(item);
       } catch (error) {
         item.status = "Error";
         item.error = error.message;
         failed += 1;
-        log(`${label} dòng ${item.part}: ${error.message}`);
+        log(`${label || item.fileName} dòng ${item.part}: ${error.message}`);
         if (isRateLimitError(error)) {
           applyRateLimit(error);
           item.status = "Queued"; item.error = ""; failed -= 1;
+          pending.push(item);
+        } else if (retryLater(item)) {
+          failed -= 1;
           pending.push(item);
         }
         // Dòng lỗi giữ trạng thái Lỗi, các dòng khác vẫn chạy tiếp; cuối batch bấm "Chạy lại lỗi".
@@ -1209,20 +1233,33 @@ async function runBatchJobs() {
     log(result.failed ? `Batch xong, ${result.failed} file lỗi. Bấm "Chạy lại lỗi" rồi "Chạy hàng loạt".` : "Đã hoàn tất tất cả Batch Job. Full MP3 và SRT đã lưu cạnh file txt.");
     return;
   }
+  // Một pool chung cho mọi part: part ít dòng không làm trống suất song song.
+  const queues = new Map();
   for (const file of state.batchFiles) {
-    if (!state.running) break;
-    state.activeSource = file.source;
     normalizeSourceItems(file.source);
-    renderBatchFiles(); renderRows();
     const queue = state.items.filter((item) => item.source === file.source);
-    if (queue.every(isDone)) continue;
-    log(`Batch bắt đầu: ${file.name} (${queue.length} dòng, ${concurrency()} song song)`);
-    const result = await runPool(queue, file.name);
-    log(`Batch kết thúc: ${file.name} -> ${fileStatus(file.source)}${result.failed ? ` (${result.failed} dòng lỗi)` : ""}`);
+    if (!queue.every(isDone)) queues.set(file.source, { file, queue });
+  }
+  const joined = new Set(); const joins = [];
+  const finish = ({ file, queue }) => {
+    if (joined.has(file.source)) return;
+    joined.add(file.source);
+    log(`Batch kết thúc: ${file.name} -> ${fileStatus(file.source)}`);
     if ($("autoSrt").checked && queue.some(isDone)) {
-      try { await joinItems(queue, true); } catch (error) { log(`Ghép ${file.name}: ${error.message}`); }
+      joins.push(joinItems(queue, true).catch((error) => log(`Ghép ${file.name}: ${error.message}`)));
     }
-    if (result.fatal) { state.running = false; break; }
+  };
+  if (queues.size) {
+    state.activeSource = [...queues.keys()][0];
+    renderBatchFiles(); renderRows();
+    const all = [...queues.values()].flatMap((q) => q.queue);
+    log(`Batch: ${queues.size} part, ${all.filter((i) => !isDone(i)).length} dòng, ${concurrency()} job song song chung.`);
+    await runPool(all, "", (item) => {
+      const q = queues.get(item.source);
+      if (q.queue.every(isDone)) finish(q);
+    });
+    for (const q of queues.values()) finish(q); // part còn dòng lỗi hoặc bị Stop giữa chừng
+    await Promise.all(joins);
   }
   state.running = false; state.batchMode = false;
   updateStatusBar();
@@ -1502,18 +1539,4 @@ async function bootConnection() {
   setConnection("err", "Không kết nối được backend");
   $("keyHint").textContent = "Backend chưa chạy. Hãy đóng app và mở lại.";
 }
-let aivieBooted = false;
-const openProviderChooser = () => {
-  if (state.running) return log("Đang tạo voice. Hãy bấm Stop trước khi đổi dịch vụ.");
-  $("providerChooser").style.display = "flex";
-};
-$("chooseAivie").addEventListener("click", () => {
-  $("providerChooser").style.display = "none";
-  if (!aivieBooted) { aivieBooted = true; bootConnection(); }
-});
-$("chooseSonic").addEventListener("click", () => {
-  if (state.running) return log("Đang tạo voice. Hãy bấm Stop trước khi đổi dịch vụ.");
-  window.location.href = "sonic.html";
-});
-$("backToProviders").addEventListener("click", openProviderChooser);
-$("changeProvider").addEventListener("click", openProviderChooser);
+bootConnection();
