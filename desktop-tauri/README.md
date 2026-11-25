@@ -5,7 +5,7 @@ mở app, dán API key AIVIE và bấm Kết nối. Không cần cài Node hay f
 
 ## Cấu trúc
 
-- Giao diện: dùng thẳng `../app/public` (không copy, sửa web là sửa desktop).
+- Giao diện: React trong `../app`, Tauri tự build ra `../app/dist`.
 - Backend: `../app/server.js` được bundle bằng esbuild rồi đóng thành 1 exe (Node SEA)
   tại `src-tauri/binaries/naturalvoice-server-x86_64-pc-windows-msvc.exe`. Tauri khởi động
   nó làm sidecar trên cổng ngẫu nhiên và tắt khi đóng app.

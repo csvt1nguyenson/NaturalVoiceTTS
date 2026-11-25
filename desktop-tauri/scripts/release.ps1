@@ -11,7 +11,7 @@ $endpoint = $conf.plugins.updater.endpoints[0]
 if ($endpoint -match "github.com/([^/]+)/([^/]+)/") { $owner = $Matches[1]; $repo = $Matches[2] } else { throw "Endpoint updater chưa đúng dạng GitHub." }
 
 Write-Host "== Build v$version =="
-Set-Location $root\..\app; npm run build:css | Out-Null; Set-Location $root
+Set-Location $root\..\app; npm ci; if ($LASTEXITCODE -ne 0) { throw "npm ci that bai" }; Set-Location $root
 $env:TAURI_SIGNING_PRIVATE_KEY = (Get-Content .tauri-keys\naturalvoice.key -Raw).Trim()
 $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
 npx tauri build --ci

@@ -1,5 +1,6 @@
 # Dependencies / build
 node_modules/
+app/dist/
 **/target/
 app/output/
 app/public/indexdemo.html

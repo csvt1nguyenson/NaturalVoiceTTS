@@ -4,7 +4,9 @@
   "version": "1.0.9",
   "identifier": "vn.kavomedia.naturalvoice",
   "build": {
-    "frontendDist": "../../app/public"
+    "beforeDevCommand": { "script": "npm --prefix ../app run build", "wait": true },
+    "beforeBuildCommand": "npm --prefix ../app run build",
+    "frontendDist": "../../app/dist"
   },
   "app": {
     "windows": [

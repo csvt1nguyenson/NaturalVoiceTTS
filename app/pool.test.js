@@ -2,8 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
+import { spawnSync } from "node:child_process";
 
-const src = fs.readFileSync(new URL("./public/app.js", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+const src = fs.readFileSync(new URL("./src/engine.js", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 const grab = (head) => {
   const at = src.indexOf(head);
   assert.notEqual(at, -1, head);
@@ -114,4 +115,24 @@ test("broken saved voices never throw", () => {
   raw = '[{"id":"x","name":7,"models":["m",1]}]';
   const [v] = c.loadSavedVoices();
   assert.equal(v.name, ""); assert.equal(v.models.join(), "m");
+});
+
+test("engine import exposes a quiet store without browser globals", () => {
+  const code = `import { state, subscribe, getVersion, notify, actions, selectors, boot } from './src/engine.js';
+    if (getVersion() !== 0 || state.items.length || !state.ui || typeof boot !== 'function' || !actions.start || !selectors.visibleItems) process.exit(2);
+    let called = 0; const stop = subscribe(() => called++); notify(); setTimeout(() => { stop(); process.exit(called === 1 && getVersion() === 1 ? 0 : 3); }, 130);`;
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e", code], { cwd: new URL(".", import.meta.url), encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+});
+
+test("loading the same file twice never duplicates lines", () => {
+  const state = { items: [], batchFiles: [], activeSource: "" };
+  const c = load(["function alreadyLoaded(", "function registerBatchFile(", "function addBatchTextFile(", "function addSingleEntries("], {
+    state, fileStem: (n) => n.replace(/\.[^.]+$/, ""), parseTxtByLine: (t) => t.split("\n"), splitText: (t) => [t]
+  });
+  const file = { name: "a.txt", fullPath: "D:/x/a.txt", dirPath: "D:/x", text: "1\n2" };
+  c.addBatchTextFile(file); c.addBatchTextFile(file);
+  c.addSingleEntries([{ name: "b.txt", text: "3" }]); c.addSingleEntries([{ name: "b.txt", text: "3" }]);
+  assert.equal(state.items.length, 3);
+  assert.deepEqual(state.batchFiles.map((f) => f.name), ["a", "b"]);
 });

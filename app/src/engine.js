@@ -1,4 +1,4 @@
-const state = {
+export const state = {
   items: [],
   batchFiles: [],
   activeSource: "",
@@ -10,15 +10,27 @@ const state = {
   outputDir: "",
   concurrentLimit: 0,
   batchMode: false,
-  pausedUntil: 0
+  pausedUntil: 0,
+  ui: { logs: [], logCount: 0, connection: { kind: "off", text: "Chưa kết nối" }, credit: "-", concurrentLimit: "-", quota: null, statusLabel: "Sẵn sàng", statusOutput: "", voiceMeta: "Chưa chọn voice.", keyHint: "Key lưu trên máy này.", savedVoices: [], jobs: [], jobsOpen: false, modal: null, update: null }
 };
+const listeners = new Set();
+let version = 0, scheduled = false;
+export const subscribe = (fn) => { listeners.add(fn); return () => listeners.delete(fn); };
+export const getVersion = () => version;
+export function notify() {
+  if (scheduled) return;
+  scheduled = true;
+  const flush = () => { if (!scheduled) return; scheduled = false; version++; listeners.forEach((fn) => fn()); };
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(flush);
+  setTimeout(flush, 100);
+}
 
 const $ = (id) => document.getElementById(id);
 // Desktop (Tauri): toàn bộ backend nằm trong Rust, gọi qua invoke("api").
 // Web: gọi HTTP tới server.js như cũ.
-const TAURI = window.__TAURI__ || null;
+const TAURI = typeof window === "undefined" ? null : window.__TAURI__ || null;
 const IS_DESKTOP = Boolean(TAURI?.core?.invoke);
-const API_BASE = "http://127.0.0.1:3177";
+const API_BASE = "";
 const apiFetch = async (path, options = {}) => {
   if (!IS_DESKTOP) return fetch(`${API_BASE}${path}`, options);
   let body = {};
@@ -34,25 +46,14 @@ function fileLink(filePath, label) {
   if (IS_DESKTOP) return `<a href="#" class="file-link" data-open-path="${escapeHtml(filePath)}">${escapeHtml(label)}</a>`;
   return `<a class="file-link" href="${API_BASE}/api/download-file?path=${encodeURIComponent(filePath)}" target="_blank">${escapeHtml(label)}</a>`;
 }
-document.addEventListener("click", (event) => {
-  const link = event.target.closest("[data-open-path]");
-  if (!link) return;
-  event.preventDefault();
-  apiFetch("/api/open-path", { method: "POST", body: JSON.stringify({ path: link.dataset.openPath }) })
-    .then((r) => r.json()).then((d) => { if (d.error) log(d.error); }).catch((e) => log(e.message));
-});
 let logLines = 0;
 function appendLog(text, cls = "") {
-  const el = $("log");
-  const line = document.createElement("span");
-  if (cls) line.className = cls;
-  line.textContent = text + "\n";
-  el.appendChild(line);
-  while (el.childNodes.length > 800) el.removeChild(el.firstChild);
-  logLines += 1;
-  if ($("logCount")) $("logCount").textContent = `${logLines} dòng`;
+  const ui = state.ui;
+  ui.logs.push({ id: ++logLines, text, kind: cls.replace("log-", "") || "normal" });
+  if (ui.logs.length > 800) ui.logs.shift();
+  ui.logCount = logLines;
   queueLogFile(`[AIVIE] ${text}`);
-  el.scrollTop = el.scrollHeight;
+  notify();
 }
 const log = (message) => appendLog(`[${new Date().toLocaleTimeString("vi-VN")}] ${message}`, /lỗi|error|failed/i.test(String(message)) ? "log-error" : "");
 // ---------- Log ghi ra file theo ngày (Documents\NaturalVoice\logs) ----------
@@ -71,7 +72,7 @@ async function flushLogFile() {
   if (!lines.length) return;
   try { await apiFetch("/api/log-append", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ date: localDate(), lines }) }); } catch {}
 }
-queueLogFile(`===== [AIVIE] Mở NaturalVoice ${localDate()} ${new Date().toLocaleTimeString("vi-VN")} =====`);
+// queueLogFile(`===== [AIVIE] Mở NaturalVoice ${localDate()} ${new Date().toLocaleTimeString("vi-VN")} =====`);
 
 
 let lastServerLogIndex = 0;
@@ -86,52 +87,27 @@ async function pollServerLogs() {
     }
   } catch {}
 }
-setInterval(pollServerLogs, 2000);
+
 
 const ACTIVE = new Set(["Creating job", "Waiting AIVIE", "Rendering", "Processing"]);
 function isDone(item) { return item.status === "Done" || item.status === "Done (no audio)"; }
 function isActive(item) { return ACTIVE.has(item.status) || /^AIVIE /.test(item.status || ""); }
 
-function updateTitle() {
-  const visible = visibleItems();
-  const done = visible.filter(isDone).length;
-  const active = visible.filter(isActive).length;
-  const errors = visible.filter((item) => item.status === "Error").length;
-  const name = state.activeSource ? fileStem(state.activeSource.split(/[\\/]/).pop()) : "";
-  const parts = [];
-  if (name) parts.push(name);
-  parts.push(visible.length ? `${done} xong · ${active} đang chạy${errors ? ` · ${errors} lỗi` : ""} · ${visible.length} tổng` : "Chưa có dòng nào");
-  if ($("queueSummary")) $("queueSummary").textContent = parts.join(" · ");
-  updateStatusBar();
-}
+function updateTitle() { updateStatusBar(); notify(); }
 
 function updateStatusBar() {
-  const all = state.items;
-  const done = all.filter(isDone).length;
-  const active = all.filter(isActive).length;
-  const files = state.batchFiles.length;
-  const filesDone = state.batchFiles.filter((file) => fileStatus(file.source) === "Done").length;
-  const pct = all.length ? Math.round((done / all.length) * 100) : 0;
-  if (!$("statusBar")) return;
-  $("statusBar").style.width = `${pct}%`;
-  $("statusLines").textContent = `${done} / ${all.length} dòng`;
-  $("statusFiles").textContent = `File ${filesDone} / ${files}`;
-  $("statusActive").textContent = `${active} job đang render`;
-  $("statusLabel").textContent = state.running ? (state.pausedUntil > Date.now() ? $("statusLabel").textContent : "Đang chạy") : (all.length && done === all.length ? "Hoàn tất" : "Sẵn sàng");
-  $("statusOutput").textContent = state.outputDir ? `Output: ${state.outputDir}` : "";
+  const all = state.items, done = all.filter(isDone).length;
+  state.ui.statusLabel = state.running ? (state.pausedUntil > Date.now() ? state.ui.statusLabel : "Đang chạy") : (all.length && done === all.length ? "Hoàn tất" : "Sẵn sàng");
+  state.ui.statusOutput = state.outputDir ? `Output: ${state.outputDir}` : "";
+  notify();
 }
 
-function statusPill(status, error) {
+function statusView(status, error) {
   const s = String(status || "Queued");
-  let cls = "pill-queued"; let label = "Chờ";
-  if (isDone({ status: s })) { cls = "pill-done"; label = "Done"; }
-  else if (s === "Error") { cls = "pill-error"; label = "Lỗi"; }
-  else if (s === "Creating job") { cls = "pill-run"; label = "Đang tạo job"; }
-  else if (s === "Waiting AIVIE" || s === "AIVIE queued") { cls = "pill-run"; label = "AIVIE queued"; }
-  else if (s === "Rendering" || s === "AIVIE rendering" || s === "Processing") { cls = "pill-run"; label = "Đang render"; }
-  else if (s === "AIVIE finalizing") { cls = "pill-run"; label = "Chờ audio"; }
-  else if (/^AIVIE /.test(s)) { cls = "pill-run"; label = s.replace("AIVIE ", ""); }
-  return `<span class="pill ${cls}" title="${escapeHtml(error || s)}">${escapeHtml(label)}</span>`;
+  if (isDone({ status: s })) return { kind: "done", label: "Done", title: error || s };
+  if (s === "Error") return { kind: "error", label: "Lỗi", title: error || s };
+  const labels = { "Creating job": "Đang tạo job", "Waiting AIVIE": "AIVIE queued", "AIVIE queued": "AIVIE queued", "Rendering": "Đang render", "AIVIE rendering": "Đang render", "Processing": "Đang render", "AIVIE finalizing": "Chờ audio" };
+  return s in labels || s.startsWith("AIVIE ") ? { kind: "run", label: labels[s] || s.slice(6), title: error || s } : { kind: "queued", label: "Chờ", title: error || s };
 }
 
 function visibleItems() {
@@ -139,49 +115,9 @@ function visibleItems() {
   return state.items.filter((item) => item.source === state.activeSource);
 }
 
-function renderRows() {
-  $("rows").innerHTML = visibleItems().map((item, index) => {
-    const filePath = item.fullPath || (item.output ? (item.output.includes(":\\") || item.output.startsWith("\\\\") ? item.output : `${item.outputFolder}/${item.output}`) : "");
-    const display = item.output ? (item.output.includes("\\") || item.output.includes("/") ? item.output.split(/[\\/]/).pop() : item.output) : "";
-    return `
-    <tr>
-      <td class="td text-ink-3">${index + 1}</td>
-      <td class="td text-ink-2">${item.part || ""}</td>
-      <td class="td" title="${escapeHtml(item.fileName || item.source || "")}">${escapeHtml(item.text)}</td>
-      <td class="td">${statusPill(item.status, item.error)}${item.status === "Error" ? `<button class="btn btn-sm ml-1 h-5 px-1.5" data-retry-item="${state.items.indexOf(item)}" title="Chỉ chạy lại dòng này">Chạy lại</button>` : ""}</td>
-      <td class="td">${display ? fileLink(filePath, display) : '<span class="text-ink-3">—</span>'}</td>
-    </tr>`;
-  }).join("") || '<tr><td class="td text-ink-3" colspan="5">Chưa có dòng nào. Nhập file .srt/.txt/.dgt hoặc kéo thả vào đây.</td></tr>';
-  updateTitle();
-}
+function renderRows() { updateTitle(); }
 
-function renderBatchFiles() {
-  $("batchFilesRows").innerHTML = state.batchFiles.map((file, index) => {
-    const items = state.items.filter((item) => item.source === file.source);
-    const done = items.filter(isDone).length;
-    const st = fileStatus(file.source);
-    const pill = st === "Done" ? '<span class="pill pill-done">Hoàn tất</span>'
-      : st === "Error" ? '<span class="pill pill-error">Lỗi</span>'
-      : st === "Processing" ? '<span class="pill pill-run">Đang render</span>'
-      : '<span class="pill pill-queued">Chờ</span>';
-    const folder = items[0]?.outputFolder || "";
-    return `
-    <tr class="cursor-pointer" aria-selected="${file.source === state.activeSource}" data-source="${escapeHtml(file.source)}">
-      <td class="td text-ink-3">${index + 1}</td>
-      <td class="td truncate" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</td>
-      <td class="td text-ink-2">${done} / ${items.length}</td>
-      <td class="td">${pill}${st === "Error" ? `<button class="btn btn-sm ml-1 h-5 px-1.5" data-retry-file="${escapeHtml(file.source)}" title="Chạy lại các dòng lỗi của file này">Chạy lại</button>` : ""}</td>
-      <td class="td truncate text-xs text-ink-3" title="${escapeHtml(folder)}">${escapeHtml(folder)}</td>
-    </tr>`;
-  }).join("") || '<tr><td class="td text-ink-3" colspan="5">Chưa có file. Chọn thư mục chứa .txt rồi bấm Quét thư mục.</td></tr>';
-  Array.from($("batchFilesRows").querySelectorAll("tr")).forEach((row) => {
-    row.addEventListener("click", () => {
-      state.activeSource = row.dataset.source;
-      renderBatchFiles();
-      renderRows();
-    });
-  });
-}
+function renderBatchFiles() { notify(); }
 
 function fileStatus(source) {
   const items = state.items.filter((item) => item.source === source);
@@ -192,6 +128,12 @@ function fileStatus(source) {
   return "Queued";
 }
 
+// Nạp lại cùng một file sẽ nhân đôi dòng và tốn credit gấp đôi.
+function alreadyLoaded(source, name) {
+  if (!state.items.some((item) => item.source === source)) return false;
+  log(`Bỏ qua ${name}: đã có trong danh sách. Muốn nạp lại thì bấm Xoá danh sách trước.`);
+  return true;
+}
 function registerBatchFile(source, name) {
   if (!state.batchFiles.some((file) => file.source === source)) {
     state.batchFiles.push({ source, name });
@@ -240,15 +182,8 @@ async function callMcpTool(toolName, args = {}) {
 
 function renderVoiceResults(voices = []) {
   state.voiceResults = voices;
-  $("voiceResults").innerHTML = voices.map((voice, index) => {
-    const models = voiceModels(voice).join(",");
-    const label = `${voice.name || voiceId(voice)} | ${voice.language || ""} | ${voice.gender || ""} | ${models}`;
-    return `<option value="${index}">${escapeHtml(label)}</option>`;
-  }).join("");
-  if (voices.length) {
-    $("voiceResults").selectedIndex = 0;
-    applyVoice(voices[0]);
-  }
+  if (voices.length) applyVoice(voices[0]);
+  notify();
 }
 
 function voiceId(voice) {
@@ -345,7 +280,7 @@ function applyVoice(voice) {
   }
   const gender = voice.gender === "male" ? "nam" : voice.gender === "female" ? "nữ" : voice.gender || "";
   const meta = [voice.language ? `Ngôn ngữ gốc <strong class="font-medium text-ink-2">${escapeHtml(voice.language)}</strong>` : "", gender, models.length ? `chạy được ${escapeHtml(models.join(", "))}` : ""].filter(Boolean).join(" · ");
-  if ($("voiceMeta")) $("voiceMeta").innerHTML = meta || "Chưa chọn voice.";
+  state.ui.voiceMeta = [voice.language ? `Ngôn ngữ gốc ${voice.language}` : "", gender, models.length ? `chạy được ${models.join(", ")}` : ""].filter(Boolean).join(" · ") || "Chưa chọn voice."; notify();
   log(`Chọn voice: ${voice.name || voiceId(voice)} (${voiceId(voice)})`);
 }
 
@@ -489,6 +424,8 @@ function addSingleEntries(entries, mode = "single") {
       : parseTxtByLine(entry.text).flatMap(splitText).map((value) => ({ text: value }));
     const source = entry.fullPath || entry.relativePath || entry.name;
     const relative = entry.relativePath || entry.name;
+    if (alreadyLoaded(source, entry.name)) continue;
+    registerBatchFile(source, fileStem(entry.name));
     const folder = mode === "folder" ? `folder-import/${fileStem(relative)}` : `single-import/${fileStem(entry.name)}`;
     chunks.forEach((chunk, index) => state.items.push({
       text: chunk.text,
@@ -562,6 +499,7 @@ async function addBatchFolder(files) {
     const text = await file.text();
     const chunks = parseTxtByLine(text);
     const relative = file.webkitRelativePath || file.name;
+    if (alreadyLoaded(relative, file.name)) continue;
     const stem = fileStem(file.name);
     // Nếu có đường dẫn ổ đĩa nhập ở ô batchFolderName thì lưu thẳng vào ổ đĩa kế bên txt
     const folder = isDiskPath ? `${basePath}\\${stem}` : `batch/${fileStem(relative)}`;
@@ -582,6 +520,7 @@ async function addBatchFolder(files) {
 }
 
 function addBatchTextFile(file) {
+  if (alreadyLoaded(file.fullPath || file.relativePath || file.name, file.name)) return;
   const chunks = parseTxtByLine(file.text);
   // Tạo folder con mang tên file ngay tại nơi có file txt
   const stem = fileStem(file.name);
@@ -663,30 +602,21 @@ function itemTitle(item) {
 
 async function refreshBalance() {
   const data = await callMcpTool("get_balance");
-  $("creditBalance").textContent = data.balance ?? data.credits ?? data.aivie_credits ?? "-";
+  state.ui.credit = data.balance ?? data.credits ?? data.aivie_credits ?? "-";
   const limit = Number(data.concurrent_render_limit ?? data.concurrent_limit ?? data.concurrency_limit ?? data.concurrency ?? 0);
-  state.concurrentLimit = limit;
-  $("concurrentLimit").textContent = limit || "-";
-  if ($("concurrentHint")) $("concurrentHint").textContent = limit || "-";
+  state.concurrentLimit = limit; state.ui.concurrentLimit = limit || "-";
   if (limit > 0 && $("concurrency")) {
-    const sel = $("concurrency");
-    const current = Number(sel.value) || 3;
+    const sel = $("concurrency"), current = Number(sel.value) || 3;
     sel.innerHTML = Array.from({ length: Math.min(limit, 10) }, (_, i) => `<option value="${i + 1}">${i + 1}</option>`).join("");
     sel.value = String(Math.min(current, limit));
   }
-  log("Balance: " + $("creditBalance").textContent + " credits.");
+  log("Balance: " + state.ui.credit + " credits."); notify();
 }
 
 async function refreshJobs() {
   const data = await callMcpTool("list_jobs", { limit: 20 });
-  const jobs = data.jobs || data.items || (Array.isArray(data) ? data : []);
-  $("jobsRows").innerHTML = jobs.map((job) => {
-    const id = job.job_id || job.id || "";
-    const status = job.status || "unknown";
-    const action = status === "queued" || status === "rendering" ? '<button data-cancel-job="' + escapeHtml(id) + '">Hủy</button>' : "";
-    return '<tr><td title="' + escapeHtml(id) + '">' + escapeHtml(id.slice(0, 12)) + '</td><td>' + escapeHtml(job.title || "") + '</td><td>' + escapeHtml(status) + '</td><td>' + escapeHtml(String(job.credits ?? "-")) + '</td><td>' + action + '</td></tr>';
-  }).join("") || '<tr><td colspan="5">Chưa có job.</td></tr>';
-  log("Đã tải " + jobs.length + " job AIVIE.");
+  state.ui.jobs = data.jobs || data.items || (Array.isArray(data) ? data : []);
+  log("Đã tải " + state.ui.jobs.length + " job AIVIE."); notify();
 }
 
 async function cancelJob(jobId) {
@@ -695,14 +625,7 @@ async function cancelJob(jobId) {
   await refreshJobs();
 }
 
-function setConnection(stateName, text) {
-  const chip = $("connectionStatus");
-  if (!chip) return;
-  chip.dataset.state = stateName;
-  const cls = { on: "border-ok/40 bg-ok-soft text-ok", off: "border-line bg-raised text-ink-3", busy: "border-warn/40 bg-warn-soft text-warn", err: "border-bad/40 bg-bad-soft text-bad" }[stateName] || "";
-  chip.className = `inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium ${cls}`;
-  ($("connectionText") || chip).textContent = text;
-}
+function setConnection(kind, text) { state.ui.connection = { kind, text }; notify(); }
 
 async function connect() {
   setConnection("busy", "Đang kết nối…");
@@ -738,7 +661,7 @@ async function saveKey() {
   const data = await response.json();
   if (!response.ok || data.error) throw new Error(data.error || "Save key failed");
   $("apiKey").value = "";
-  $("keyHint").textContent = `Đã lưu ${data.keyCount || 1} key trên máy này. App tự xoay vòng khi một key hết lượt.`;
+  state.ui.keyHint = `Đã lưu ${data.keyCount || 1} key trên máy này. App tự xoay vòng khi một key hết lượt.`;
   log(`Đã lưu ${data.keyCount || 1} API key.`);
   refreshQuota();
 }
@@ -748,7 +671,7 @@ async function clearKey() {
   const data = await response.json();
   if (!response.ok || data.error) throw new Error(data.error || "Clear key failed");
   $("apiKey").value = "";
-  $("keyHint").textContent = "Đã xoá key đã lưu.";
+  state.ui.keyHint = "Đã xoá key đã lưu.";
   renderQuota({ keys: [], used: 0, total: 0, free: 0 });
   log("Đã xoá API key đã lưu.");
 }
@@ -762,17 +685,13 @@ function askAcceptV2(message) {
   if (acceptV2) return Promise.resolve(true);
   if (!state.running) return Promise.resolve(false);
   if (!v2Prompt) v2Prompt = new Promise((resolve) => {
-    $("v2Message").textContent = message;
     const close = (ok) => {
-      $("v2Modal").classList.add("hidden"); $("v2Modal").classList.remove("flex");
-      v2Prompt = null;
+      state.ui.modal = null; v2Prompt = null;
       if (ok) { acceptV2 = true; log("Đã đồng ý render bằng Multilingual v2 trong lúc v3/v4 bảo trì."); }
       else { state.running = false; updateStatusBar(); log("Không đồng ý render bằng v2, đã dừng. Chạy lại sau hoặc đổi model/giọng khác."); }
-      resolve(ok);
+      notify(); resolve(ok);
     };
-    $("v2OkBtn").onclick = () => close(true);
-    $("v2CancelBtn").onclick = () => close(false);
-    $("v2Modal").classList.remove("hidden"); $("v2Modal").classList.add("flex");
+    state.ui.modal = { message, confirm: () => close(true), cancel: () => close(false) }; notify();
   });
   return v2Prompt;
 }
@@ -880,25 +799,14 @@ async function callTool(item, index) {
 
 
 // ---------- Hạn mức tạo job: 60 job/giờ cho mỗi key, app tự xoay key ----------
-function renderQuota(q) {
-  if (!q) return;
-  state.quota = q;
-  if ($("statusQuota")) $("statusQuota").textContent = q.total ? `Lượt tạo job ${q.used}/${q.total} giờ này` : "Lượt tạo job -";
-  if ($("keyQuota")) {
-    $("keyQuota").innerHTML = (q.keys || []).map((k) => {
-      const pct = Math.min(100, Math.round((k.used / (k.usable || k.limit)) * 100));
-      const note = k.blockedFor > 0 ? `nghỉ ${Math.ceil(k.blockedFor / 60)} phút` : `${k.used}/${k.limit}`;
-      return `<div class="flex items-center gap-2 text-xs text-ink-3"><span class="w-14 shrink-0 font-mono">${escapeHtml(k.label)}</span><span class="h-1 flex-1 overflow-hidden rounded-full bg-raised"><span class="block h-full ${pct >= 100 ? "bg-bad" : "bg-brand"}" style="width:${pct}%"></span></span><span class="w-16 shrink-0 text-right tabular-nums">${note}</span></div>`;
-    }).join("");
-  }
-}
+function renderQuota(q) { if (!q) return; state.quota = q; state.ui.quota = q; notify(); }
 async function refreshQuota() {
   try {
     const res = await apiFetch("/api/quota");
     if (res.ok) renderQuota(await res.json());
   } catch {}
 }
-setInterval(refreshQuota, 5000);
+
 
 // ---------- Poller dùng chung: 1 request list_jobs cho tất cả job đang chạy ----------
 const activeJobs = new Map(); // jobId -> { item, resolve, reject, since }
@@ -958,7 +866,7 @@ function applyRateLimit(error) {
   clearInterval(pauseTicker);
   pauseTicker = setInterval(() => {
     const left = Math.max(0, Math.ceil((state.pausedUntil - Date.now()) / 1000));
-    if ($("statusLabel")) $("statusLabel").textContent = left ? `Chờ lượt ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}` : (state.running ? "Đang chạy" : "Sẵn sàng");
+    state.ui.statusLabel = left ? `Chờ lượt ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}` : (state.running ? "Đang chạy" : "Sẵn sàng"); notify();
     if (!left) clearInterval(pauseTicker);
   }, 1000);
 }
@@ -1095,11 +1003,6 @@ function retryLater(target, error) {
   return true;
 }
 
-// Nhớ 2 tuỳ chọn giữa các lần mở app.
-for (const id of ["autoSrt", "loopMode"]) {
-  try { const v = localStorage.getItem(`nv.${id}`); if (v !== null) $(id).checked = v === "1"; } catch {}
-  $(id).addEventListener("change", () => { try { localStorage.setItem(`nv.${id}`, $(id).checked ? "1" : "0"); } catch {} });
-}
 
 async function runFilePool(groups) {
   groups.forEach((g) => { g.autoRetries = 0; });
@@ -1269,7 +1172,7 @@ async function runBatchJobs() {
     const result = await runFilePool(groups);
     state.running = false; state.batchMode = false;
     updateStatusBar();
-    log(result.failed ? `Batch xong, ${result.failed} file lỗi. Bấm "Chạy lại lỗi" rồi "Chạy hàng loạt".` : "Đã hoàn tất tất cả Batch Job. Full MP3 và SRT đã lưu cạnh file txt.");
+    log(result.failed ? `Batch xong, ${result.failed} file lỗi. Bấm "Chạy lại lỗi" để chạy lại.` : "Đã hoàn tất tất cả file. Audio đã lưu vào thư mục.");
     return;
   }
   // Một pool chung cho mọi part: part ít dòng không làm trống suất song song.
@@ -1305,9 +1208,9 @@ async function runBatchJobs() {
   updateStatusBar();
   const errors = state.items.filter((item) => item.status === "Error").length;
   log(state.batchFiles.every((file) => fileStatus(file.source) === "Done")
-    ? "Đã hoàn tất tất cả Batch Job. Voice, SRT và full MP3 đã lưu vào thư mục."
-    : errors ? `Batch xong nhưng có ${errors} dòng lỗi. Chọn file trong bảng Batch Job rồi bấm "Chạy lại lỗi", sau đó "Chạy hàng loạt".`
-    : "Batch đã dừng. File chưa xong giữ trạng thái Chờ, bấm Chạy hàng loạt để tiếp tục.");
+    ? "Đã hoàn tất tất cả file. Audio đã lưu vào thư mục."
+    : errors ? `Batch xong nhưng có ${errors} dòng lỗi. Bấm "Chạy lại lỗi" để chạy lại.`
+    : "Batch đã dừng. File chưa xong giữ trạng thái Chờ, bấm Chạy tất cả để tiếp tục.");
 }
 
 function stopAll() {
@@ -1448,109 +1351,40 @@ function isRateLimitError(error) {
   return /gọi quá nhanh|rate.?limit|rate_limited|too many|try again after|thử lại sau|429/i.test(String(error?.message || error));
 }
 
-$("connectBtn").addEventListener("click", () => connect().then(refreshBalance).catch((e) => {
-  setConnection("err", "Kết nối lỗi");
-  log(e.message);
-}));
-$("refreshBalanceBtn").addEventListener("click", () => refreshBalance().catch((e) => log(e.message)));
-$("jobsBtn").addEventListener("click", async () => {
-  const panel = $("jobsPanel");
-  panel.hidden = !panel.hidden;
-  $("jobsBtn").textContent = panel.hidden ? "Jobs" : "Đóng Jobs";
-  if (!panel.hidden) await refreshJobs().catch((e) => log(e.message));
-});
-$("refreshJobsBtn").addEventListener("click", () => refreshJobs().catch((e) => log(e.message)));
-$("jobsRows").addEventListener("click", (event) => {
-  const button = event.target.closest("[data-cancel-job]");
-  if (button) cancelJob(button.dataset.cancelJob).catch((e) => log(e.message));
-});
-$("searchVoiceBtn").addEventListener("click", () => searchVoiceLibrary().catch((e) => log(e.message)));
-$("voiceLibraryBtn").addEventListener("click", () => loadVoiceLibrary().catch((e) => log(e.message)));
-$("addVoiceBtn").addEventListener("click", () => addSelectedVoice().catch((e) => log(e.message)));
-$("voiceResults").addEventListener("change", applySelectedVoice);
-$("voiceResults").addEventListener("click", applySelectedVoice);
-$("voiceResults").addEventListener("keyup", applySelectedVoice);
-$("voiceResults").addEventListener("dblclick", applySelectedVoice);
-$("saveKeyBtn").addEventListener("click", () => saveKey().catch((e) => log(e.message)));
-$("clearKeyBtn").addEventListener("click", () => clearKey().catch((e) => log(e.message)));
-$("batchFolderInput").addEventListener("change", (e) => addBatchFolder(e.target.files));
-$("batchImportBtn").addEventListener("click", () => pickBatchFolder().then((handled) => { if (!handled) $("batchFolderInput").click(); }).catch((e) => log(e.message)));
-$("scanPathBtn").addEventListener("click", scanBatchPath);
-$("batchFolderName").addEventListener("paste", () => setTimeout(scanBatchPath, 50));
-$("batchFolderName").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") scanBatchPath();
-});
-$("singleFileInput").addEventListener("change", (e) => addSingleFiles(e.target.files));
-$("singleFolderInput").addEventListener("change", (e) => addSingleFiles(e.target.files, "folder"));
-$("importFileBtn").addEventListener("click", () => pickAndImportSingle("single").then((handled) => { if (!handled) $("singleFileInput").click(); }).catch((e) => log(e.message)));
-$("importFolderBtn").addEventListener("click", () => pickAndImportSingle("folder").then((handled) => { if (!handled) $("singleFolderInput").click(); }).catch((e) => log(e.message)));
-$("importVoiceBtn").addEventListener("click", () => log("Import Voice sẽ dùng khi có file voice library/template. Hiện chưa cần cho queue TTS."));
-$("openOutputBtn").addEventListener("click", openOutput);
-$("rows").addEventListener("click", (event) => {
-  const button = event.target.closest("[data-retry-item]");
-  if (button) retryItems([state.items[Number(button.dataset.retryItem)]]).catch((e) => log(e.message));
-});
-$("batchFilesRows").addEventListener("click", (event) => {
-  const button = event.target.closest("[data-retry-file]");
-  if (!button) return;
-  event.stopPropagation();
-  retryItems(state.items.filter((item) => item.source === button.dataset.retryFile)).catch((e) => log(e.message));
-});
-$("openLogFile")?.addEventListener("click", (event) => {
-  event.preventDefault(); event.stopPropagation();
-  flushLogFile().then(() => apiFetch("/api/log-open", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ date: localDate() }) }))
-    .then((r) => r.json()).then((d) => { if (d.error) log(d.error); }).catch((e) => log(e.message));
-});
-$("clearBtn").addEventListener("click", () => {
-  if (state.running) return log("Đang chạy, hãy Stop trước khi xoá danh sách.");
-  state.items = [];
-  state.batchFiles = [];
-  state.activeSource = "";
-  renderBatchFiles();
-  renderRows();
-});
-$("batchRunBtn").addEventListener("click", runBatchJobs);
-$("batchStopBtn")?.addEventListener("click", stopAll);
-$("startBtn").addEventListener("click", startQueue);
-$("stopBtn").addEventListener("click", stopAll);
-$("downloadAllAudioBtn").addEventListener("click", downloadAllAudio);
-$("downloadSrtBtn").addEventListener("click", downloadSrt);
-$("saveSrtBtn").addEventListener("click", toSrt);
-$("joinBtn").addEventListener("click", () => joinItems(visibleItems(), true));
-$("retryBtn").addEventListener("click", retryErrors);
-$("showAdvanced")?.addEventListener("change", () => {
-  $("advancedFields").hidden = !$("showAdvanced").checked;
-});
-$("toolSelect").addEventListener("change", () => {
-  try { localStorage.setItem("nv.tool", $("toolSelect").value); } catch {}
-  syncToolMode(true);
-});
-$("renderMode")?.addEventListener("change", () => syncToolMode(true));
-
-for (const event of ["dragenter", "dragover"]) {
-  $("dropZone").addEventListener(event, (e) => {
-    e.preventDefault();
-    $("dropZone").classList.add("active");
-  });
-}
-for (const event of ["dragleave", "drop"]) {
-  $("dropZone").addEventListener(event, (e) => {
-    e.preventDefault();
-    $("dropZone").classList.remove("active");
-  });
-}
-$("dropZone").addEventListener("drop", (e) => {
-  const files = Array.from(e.dataTransfer?.files || []);
-  if (!files.length) return;
-  addSingleFiles(files).catch((err) => log(err.message));
-});
-
+const safe = (fn) => (...args) => Promise.resolve().then(() => fn(...args)).catch((e) => log(e.message));
+export const actions = {
+  connect: safe(async () => { try { await connect(); await refreshBalance(); } catch (e) { setConnection("err", "Kết nối lỗi"); throw e; } }),
+  saveKey: safe(saveKey), clearKey: safe(clearKey), refreshBalance: safe(refreshBalance),
+  openJobs: safe(async () => { state.ui.jobsOpen = !state.ui.jobsOpen; notify(); if (state.ui.jobsOpen) await refreshJobs(); }),
+  refreshJobs: safe(refreshJobs), cancelJob: safe(cancelJob), searchVoice: safe(searchVoiceLibrary), loadLibrary: safe(loadVoiceLibrary), addVoice: safe(addSelectedVoice),
+  pickVoice: safe(async (index) => { const voice = state.voiceResults[Number(index)]; if (voice) applyVoice(await resolveLibraryVoice(voice)); }),
+  pickBatchFolder: safe(async () => { if (!await pickBatchFolder()) $("batchFolderInput").click(); }),
+  addBatchFiles: (files) => addBatchFolder(files), scanBatchPath: safe(scanBatchPath),
+  clearBatch: () => { if (state.running) return log("Đang chạy, hãy Stop trước khi xoá danh sách."); state.items = []; state.batchFiles = []; state.activeSource = ""; renderRows(); renderBatchFiles(); },
+  selectFile: (source) => { state.activeSource = source; renderRows(); renderBatchFiles(); },
+  runBatch: safe(runBatchJobs), start: safe(startQueue), stop: stopAll, retryErrors, retryItem: safe((index) => retryItems([state.items[Number(index)]])),
+  retryAll: safe(() => retryItems(state.items.filter((item) => item.status === "Error"))),
+  retryFile: safe((source) => retryItems(state.items.filter((item) => item.source === source))),
+  importFile: safe(async () => { if (!await pickAndImportSingle("single")) $("singleFileInput").click(); }),
+  importFolder: safe(async () => { if (!await pickAndImportSingle("folder")) $("singleFolderInput").click(); }),
+  importVoice: () => log("Import Voice sẽ dùng khi có file voice library/template. Hiện chưa cần cho queue TTS."),
+  addSingleFiles: safe(addSingleFiles), dropFiles: safe((dataTransfer) => addSingleFiles(Array.from(dataTransfer?.files || []))),
+  join: safe(() => joinItems(visibleItems(), true)), saveSrt: toSrt, openOutput: safe(openOutput),
+  openPath: safe(async (path) => { const r = await apiFetch("/api/open-path", { method: "POST", body: JSON.stringify({ path }) }); const d = await r.json(); if (d.error) log(d.error); }),
+  openLogFile: safe(async () => { await flushLogFile(); const r = await apiFetch("/api/log-open", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ date: localDate() }) }); const d = await r.json(); if (d.error) log(d.error); }),
+  toolChanged: () => { try { localStorage.setItem("nv.tool", $("toolSelect").value); } catch {} syncToolMode(true); },
+  renderModeChanged: () => syncToolMode(true), modelChanged: syncOwnKeyFields,
+  saveVoice: () => { const id = $("voiceId").value.trim(); if (!id) return log("Chưa có Voice ID để lưu."); const found = state.voiceResults.find((v) => voiceId(v) === id) || {}; const name = $("voiceName").value.trim() || found.name || id; storeSavedVoices([{ id, name, language: found.language || "", gender: found.gender || "", models: voiceModels(found) }, ...loadSavedVoices().filter((v) => v.id !== id)]); renderSavedVoices(id); log(`Đã lưu voice: ${name} (${id})`); },
+  removeVoice: () => { const id = $("savedVoices").value; if (!id) return log("Chọn voice trong danh sách đã lưu để xoá."); storeSavedVoices(loadSavedVoices().filter((v) => v.id !== id)); renderSavedVoices(); log(`Đã bỏ voice ${id} khỏi danh sách lưu.`); },
+  pickSavedVoice: (id) => { const v = loadSavedVoices().find((item) => item.id === id); if (v) renderVoiceResults([v]); },
+  downloadAllAudio: safe(() => downloadAllAudio()), downloadSrt: safe(() => downloadSrt())
+};
 
 async function bootConnection() {
-  if ($("advancedFields")) $("advancedFields").hidden = true;
+
   setConnection("off", "Chưa kết nối");
   // Web: cho tải file về; desktop: file đã nằm trên máy nên ẩn hai nút tải.
-  for (const id of ["downloadSrtBtn", "downloadAllAudioBtn"]) if ($(id)) $(id).hidden = IS_DESKTOP;
+
   renderBatchFiles();
   renderRows();
   for (let attempt = 1; attempt <= 8; attempt += 1) {
@@ -1561,14 +1395,14 @@ async function bootConnection() {
       updateStatusBar();
       log(`${IS_DESKTOP ? "Desktop" : `Web backend ${API_BASE}`} | Output: ${data.outputDir || "-"}`);
       if (data.hasSavedApiKey) {
-        $("keyHint").textContent = `Đang kết nối backend/API (lần ${attempt}/8)...`;
+        state.ui.keyHint = `Đang kết nối backend/API (lần ${attempt}/8)...`;
         await connect();
         await refreshBalance();
-        $("keyHint").textContent = `Đang dùng ${data.keyCount || 1} key lưu trên máy. Dán danh sách key mới rồi bấm Lưu key để thay.`;
+        state.ui.keyHint = `Đang dùng ${data.keyCount || 1} key lưu trên máy. Dán danh sách key mới rồi bấm Lưu key để thay.`;
         log("Tự động kết nối API thành công!");
         return;
       }
-      $("keyHint").textContent = "Chưa có API key. Hãy nhập hoặc lưu key.";
+      state.ui.keyHint = "Chưa có API key. Hãy nhập hoặc lưu key.";
       return;
     } catch (err) {
       setConnection("busy", `Đang chờ backend (${attempt}/8)`);
@@ -1577,20 +1411,11 @@ async function bootConnection() {
     }
   }
   setConnection("err", "Không kết nối được backend");
-  $("keyHint").textContent = "Backend chưa chạy. Hãy đóng app và mở lại.";
+  state.ui.keyHint = "Backend chưa chạy. Hãy đóng app và mở lại.";
 }
 // ---------- Cột trái: khối gập/mở (nhớ trạng thái), ẩn ô chỉ dành cho key riêng ----------
-document.querySelectorAll("details[data-fold]").forEach((el) => {
-  const k = `nv.fold.${el.dataset.fold}`;
-  try { const v = localStorage.getItem(k); if (v !== null) el.open = v === "1"; } catch {}
-  el.addEventListener("toggle", () => { try { localStorage.setItem(k, el.open ? "1" : "0"); } catch {} });
-});
-function syncOwnKeyFields() {
-  const own = /^(el|dv)_/.test($("model").value);
-  document.querySelectorAll("[data-own-key]").forEach((el) => { el.hidden = !own; });
-}
-$("model").addEventListener("change", syncOwnKeyFields);
-syncOwnKeyFields();
+function syncOwnKeyFields() { state.ui.ownKey = /^(el|dv)_/.test($("model")?.value || ""); notify(); }
+
 
 // ---------- Voice đã lưu (localStorage, chỉ trên máy này) ----------
 function loadSavedVoices() {
@@ -1605,33 +1430,29 @@ function loadSavedVoices() {
   } catch { return []; }
 }
 const storeSavedVoices = (list) => { try { localStorage.setItem("nv.savedVoices", JSON.stringify(list)); } catch {} };
-function renderSavedVoices(selected = "") {
-  const list = loadSavedVoices();
-  $("savedVoices").replaceChildren(new Option(list.length ? "— Chọn voice đã lưu —" : "Chưa lưu voice nào", ""),
-    ...list.map((v) => new Option(`${v.name || v.id}${v.language ? ` · ${v.language}` : ""}`, v.id)));
-  $("savedVoices").value = selected;
+function renderSavedVoices(selected = "") { state.ui.savedVoices = loadSavedVoices(); state.ui.selectedSavedVoice = selected; notify(); }
+let booted = false;
+export function boot() {
+  if (booted) return;
+  booted = true;
+  queueLogFile(`===== [AIVIE] Mở NaturalVoice ${localDate()} ${new Date().toLocaleTimeString("vi-VN")} =====`);
+  setInterval(pollServerLogs, 2000); setInterval(refreshQuota, 5000);
+  document.querySelectorAll("details[data-fold]").forEach((el) => {
+    const key = `nv.fold.${el.dataset.fold}`;
+    try { const value = localStorage.getItem(key); if (value !== null) el.open = value === "1"; } catch {}
+    el.addEventListener("toggle", () => { try { localStorage.setItem(key, el.open ? "1" : "0"); } catch {} });
+  });
+  for (const id of ["autoSrt", "loopMode"]) {
+    const el = $(id); if (!el) continue;
+    try { const value = localStorage.getItem(`nv.${id}`); if (value !== null) el.checked = value === "1"; } catch {}
+    el.addEventListener("change", () => { try { localStorage.setItem(`nv.${id}`, el.checked ? "1" : "0"); } catch {} });
+  }
+  syncOwnKeyFields(); renderSavedVoices(); bootConnection();
 }
-$("saveVoiceBtn").addEventListener("click", () => {
-  const id = $("voiceId").value.trim();
-  if (!id) return log("Chưa có Voice ID để lưu.");
-  const found = state.voiceResults.find((v) => voiceId(v) === id) || {};
-  const name = $("voiceName").value.trim() || found.name || id;
-  const entry = { id, name, language: found.language || "", gender: found.gender || "", models: voiceModels(found) };
-  storeSavedVoices([entry, ...loadSavedVoices().filter((v) => v.id !== id)]);
-  renderSavedVoices(id);
-  log(`Đã lưu voice: ${name} (${id})`);
-});
-$("removeVoiceBtn").addEventListener("click", () => {
-  const id = $("savedVoices").value;
-  if (!id) return log("Chọn voice trong danh sách đã lưu để xoá.");
-  storeSavedVoices(loadSavedVoices().filter((v) => v.id !== id));
-  renderSavedVoices();
-  log(`Đã bỏ voice ${id} khỏi danh sách lưu.`);
-});
-$("savedVoices").addEventListener("change", () => {
-  const v = loadSavedVoices().find((item) => item.id === $("savedVoices").value);
-  if (v) renderVoiceResults([v]);
-});
-renderSavedVoices();
-
-bootConnection();
+export const selectors = { voiceModels, visibleItems, fileStatus, statusView, isDone, isActive, summary: () => {
+  const visible = visibleItems(), done = visible.filter(isDone).length, active = visible.filter(isActive).length, errors = visible.filter((item) => item.status === "Error").length;
+  return { total: visible.length, done, active, errors, files: state.batchFiles.length, filesDone: state.batchFiles.filter((file) => fileStatus(file.source) === "Done").length };
+} };
+export const desktop = IS_DESKTOP;
+export const activeJobCount = () => activeJobs.size;
+export const logUpdate = log;

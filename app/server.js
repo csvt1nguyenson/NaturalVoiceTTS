@@ -21,7 +21,7 @@ function parseArgs(argv) {
 const cliArgs = parseArgs(process.argv.slice(2));
 const isSea = typeof process.execPath === "string" && !/node(\.exe)?$/i.test(process.execPath);
 const __dirname = isSea ? path.dirname(process.execPath) : path.dirname(fileURLToPath(import.meta.url));
-const publicDir = cliArgs["public-dir"] || process.env.NV_PUBLIC_DIR || path.join(__dirname, "public");
+const publicDir = cliArgs["public-dir"] || process.env.NV_PUBLIC_DIR || path.join(__dirname, "dist");
 const outputDir = path.resolve(cliArgs["output-dir"] || process.env.NV_OUTPUT_DIR || path.join(__dirname, "output"));
 const dataDir = path.resolve(cliArgs["data-dir"] || process.env.NV_DATA_DIR || path.join(__dirname, "data"));
 const configPath = path.join(dataDir, "local-config.json");
