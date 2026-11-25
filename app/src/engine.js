@@ -11,7 +11,7 @@ export const state = {
   concurrentLimit: 0,
   batchMode: false,
   pausedUntil: 0,
-  ui: { logs: [], logCount: 0, connection: { kind: "off", text: "Chưa kết nối" }, credit: "-", concurrentLimit: "-", quota: null, statusLabel: "Sẵn sàng", statusOutput: "", voiceMeta: "Chưa chọn voice.", keyHint: "Key lưu trên máy này.", savedVoices: [], jobs: [], jobsOpen: false, modal: null, update: null }
+  ui: { logs: [], logCount: 0, connection: { kind: "off", text: "Chưa kết nối" }, credit: "-", concurrentLimit: "-", quota: null, statusLabel: "Sẵn sàng", statusOutput: "", voiceMeta: "Chưa chọn voice.", keyHint: "Key lưu trên máy này.", savedVoices: [], voiceToSave: null, jobs: [], jobsOpen: false, modal: null, update: null }
 };
 const listeners = new Set();
 let version = 0, scheduled = false;
@@ -1374,9 +1374,11 @@ export const actions = {
   openLogFile: safe(async () => { await flushLogFile(); const r = await apiFetch("/api/log-open", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ date: localDate() }) }); const d = await r.json(); if (d.error) log(d.error); }),
   toolChanged: () => { try { localStorage.setItem("nv.tool", $("toolSelect").value); } catch {} syncToolMode(true); },
   renderModeChanged: () => syncToolMode(true), modelChanged: syncOwnKeyFields,
-  saveVoice: () => { const id = $("voiceId").value.trim(); if (!id) return log("Chưa có Voice ID để lưu."); const found = state.voiceResults.find((v) => voiceId(v) === id) || {}; const name = $("voiceName").value.trim() || found.name || id; storeSavedVoices([{ id, name, language: found.language || "", gender: found.gender || "", models: voiceModels(found) }, ...loadSavedVoices().filter((v) => v.id !== id)]); renderSavedVoices(id); log(`Đã lưu voice: ${name} (${id})`); },
-  removeVoice: () => { const id = $("savedVoices").value; if (!id) return log("Chọn voice trong danh sách đã lưu để xoá."); storeSavedVoices(loadSavedVoices().filter((v) => v.id !== id)); renderSavedVoices(); log(`Đã bỏ voice ${id} khỏi danh sách lưu.`); },
-  pickSavedVoice: (id) => { const v = loadSavedVoices().find((item) => item.id === id); if (v) renderVoiceResults([v]); },
+  saveVoice: () => { const id = $("voiceId").value.trim(); if (!id) return log("Chưa có Voice ID để lưu."); const found = state.voiceResults.find((v) => voiceId(v) === id) || {}; const name = $("voiceName").value.trim() || found.name || id; const picked = loadSavedVoices().find((v) => v.key === $("savedVoices").value && v.id === id); state.ui.voiceToSave = { id, label: picked?.label || "", name, language: found.language || "", gender: found.gender || "", models: voiceModels(found) }; notify(); },
+  cancelSaveVoice: () => { state.ui.voiceToSave = null; notify(); },
+  confirmSaveVoice: (value) => { const voice = { ...state.ui.voiceToSave, label: value.trim() }; storeSavedVoices(upsertSavedVoice(loadSavedVoices(), voice)); state.ui.voiceToSave = null; renderSavedVoices(voice.label || voice.id); log(`Đã lưu voice: ${voice.label ? `${voice.label} · ` : ""}${voice.name} (${voice.id})`); },
+  removeVoice: () => { const key = $("savedVoices").value; if (!key) return log("Chọn voice trong danh sách đã lưu để xoá."); storeSavedVoices(loadSavedVoices().filter((v) => v.key !== key)); renderSavedVoices(); log(`Đã bỏ voice ${key} khỏi danh sách lưu.`); },
+  pickSavedVoice: (key) => { const v = loadSavedVoices().find((item) => item.key === key); if (!v) return; renderVoiceResults([v]); },
   downloadAllAudio: safe(() => downloadAllAudio()), downloadSrt: safe(() => downloadSrt())
 };
 
@@ -1424,10 +1426,14 @@ function loadSavedVoices() {
     if (!Array.isArray(list)) return [];
     const text = (v) => (typeof v === "string" ? v : "");
     return list.filter((v) => v && text(v.id).trim()).map((v) => ({
-      id: v.id, name: text(v.name), language: text(v.language), gender: text(v.gender),
+      id: v.id, key: text(v.label) || v.id, label: text(v.label), name: text(v.name), language: text(v.language), gender: text(v.gender),
       models: Array.isArray(v.models) ? v.models.filter((m) => text(m)) : []
     }));
   } catch { return []; }
+}
+// Mỗi tên kênh giữ một voice; một voice dùng được cho nhiều kênh. Bản chưa đặt tên của voice đó được thay.
+function upsertSavedVoice(list, voice) {
+  return [voice, ...list.filter((v) => v.label ? v.label !== voice.label : v.id !== voice.id)];
 }
 const storeSavedVoices = (list) => { try { localStorage.setItem("nv.savedVoices", JSON.stringify(list)); } catch {} };
 function renderSavedVoices(selected = "") { state.ui.savedVoices = loadSavedVoices(); state.ui.selectedSavedVoice = selected; notify(); }

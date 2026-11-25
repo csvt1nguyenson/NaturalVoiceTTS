@@ -117,6 +117,16 @@ test("broken saved voices never throw", () => {
   assert.equal(v.name, ""); assert.equal(v.models.join(), "m");
 });
 
+test("saved voices are keyed by channel name", () => {
+  const { upsertSavedVoice: up } = load(["function upsertSavedVoice("], {});
+  const show = (list) => list.map((v) => `${v.label}:${v.id}`).join();
+  let list = up([{ id: "x", label: "" }], { id: "x", label: "A" });
+  assert.equal(show(list), "A:x");
+  list = up(list, { id: "x", label: "B" });
+  assert.equal(show(list), "B:x,A:x");
+  assert.equal(show(up(list, { id: "y", label: "A" })), "A:y,B:x");
+});
+
 test("engine import exposes a quiet store without browser globals", () => {
   const code = `import { state, subscribe, getVersion, notify, actions, selectors, boot } from './src/engine.js';
     if (getVersion() !== 0 || state.items.length || !state.ui || typeof boot !== 'function' || !actions.start || !selectors.visibleItems) process.exit(2);

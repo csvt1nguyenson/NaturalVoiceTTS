@@ -1969,7 +1969,7 @@ dependencies = [
 
 [[package]]
 name = "naturalvoice_desktop"
-version = "1.0.9"
+version = "2.0.0"
 dependencies = [
  "regex",
  "reqwest 0.12.28",

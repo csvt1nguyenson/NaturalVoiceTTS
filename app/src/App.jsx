@@ -74,7 +74,7 @@ function SavedVoices() {
   return (
     <Select ref={ref} id="savedVoices" aria-label="Voice đã lưu" onChange={(e) => actions.pickSavedVoice(e.target.value)}>
       <option value="">{savedVoices.length ? "— Chọn voice đã lưu —" : "Chưa lưu voice nào"}</option>
-      {savedVoices.map((v) => <option key={v.id} value={v.id}>{v.name || v.id}{v.language ? ` · ${v.language}` : ""}</option>)}
+      {savedVoices.map((v) => <option key={v.key} value={v.key}>{v.label ? `${v.label} · ` : ""}{v.name || v.id}{v.language ? ` · ${v.language}` : ""}</option>)}
     </Select>
   );
 }
@@ -124,7 +124,7 @@ const Sidebar = memo(function Sidebar() {
         <VoiceResults />
         <div className="flex gap-1.5"><Btn onClick={actions.addVoice}>+ Thêm vào Library</Btn><Btn onClick={actions.loadLibrary}>Library (Vip+)</Btn></div>
         <div className="grid grid-cols-2 gap-2">
-          <Field label="Model"><Select id="model" defaultValue="eleven_v3" onChange={actions.modelChanged}>
+          <Field label="Model"><Select id="model" defaultValue="eleven_v4" onChange={actions.modelChanged}>
             {MODELS.map(([group, list]) => <optgroup key={group} label={group}>{list.map(([v, name]) => <option key={v} value={v}>{name}</option>)}</optgroup>)}
           </Select></Field>
           <Field label="Ngôn ngữ"><Select id="language">{LANGUAGES.map(([v, name]) => <option key={v} value={v}>{name}</option>)}</Select></Field>
@@ -358,18 +358,26 @@ function StatusBar() {
 }
 
 // Esc không đóng: bấm nhầm Esc ở hộp v2 sẽ dừng cả batch.
-const Dialog = ({ title, desc, children, footer }) => (
-  <AlertDialog open><AlertDialogContent onEscapeKeyDown={(e) => e.preventDefault()}>
+const Dialog = ({ title, desc, children, footer, onEscape }) => (
+  <AlertDialog open><AlertDialogContent onEscapeKeyDown={(e) => { e.preventDefault(); onEscape?.(); }}>
     <AlertDialogHeader><AlertDialogTitle>{title}</AlertDialogTitle><AlertDialogDescription>{desc}</AlertDialogDescription></AlertDialogHeader>
     {children}<AlertDialogFooter>{footer}</AlertDialogFooter>
   </AlertDialogContent></AlertDialog>
 );
 function Dialogs() {
   useStore();
-  const { modal, update } = state.ui;
+  const { modal, update, voiceToSave } = state.ui;
   if (modal) return (
     <Dialog title="Render bằng Multilingual v2?" desc={modal.message} footer={<><Btn onClick={modal.cancel}>Huỷ</Btn><Btn variant="default" onClick={modal.confirm}>Đồng ý</Btn></>}>
       <p className="text-xs text-muted-foreground">Đồng ý: áp dụng cho mọi dòng còn lại tới khi đóng app; audio tag như [pause] sẽ bị bỏ vì v2 đọc thành tiếng. Huỷ: dừng lần chạy này.</p>
+    </Dialog>
+  );
+  if (voiceToSave) return (
+    <Dialog title="Lưu voice" desc={`${voiceToSave.name}. Đặt tên kênh để dễ phân biệt; để trống thì dùng tên voice. Trùng tên kênh thì thay voice cũ.`} onEscape={actions.cancelSaveVoice}
+      footer={<><Btn onClick={actions.cancelSaveVoice}>Huỷ</Btn><Btn variant="default" type="submit" form="saveVoiceForm">Lưu</Btn></>}>
+      <form id="saveVoiceForm" onSubmit={(e) => { e.preventDefault(); actions.confirmSaveVoice(e.currentTarget.elements.label.value); }}>
+        <Input name="label" aria-label="Tên kênh" autoFocus autoComplete="off" defaultValue={voiceToSave.label} placeholder={voiceToSave.name} />
+      </form>
     </Dialog>
   );
   if (update) return (
