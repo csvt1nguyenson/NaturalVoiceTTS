@@ -31,8 +31,8 @@
 
         <!-- Cột cài đặt -->
         <aside class="min-h-0 overflow-y-auto border-r border-line bg-surface">
-          <section class="side-section">
-            <h2>AIVIE API</h2>
+          <details class="side-section" data-fold="key">
+            <summary>Key AIVIE</summary>
             <div class="space-y-2.5">
               <label class="field"><span>Endpoint</span><input id="mcpUrl" class="input" value="https://app.aivie.pro/api/v1/mcp" /></label>
               <label class="field"><span>API key · mỗi dòng một key, tối đa 10</span><textarea id="apiKey" rows="3" class="input h-auto resize-none py-1.5 font-mono text-xs" style="-webkit-text-security: disc" spellcheck="false" placeholder="aiv_…&#10;aiv_…"></textarea></label>
@@ -49,11 +49,18 @@
               <p id="keyHint" class="text-xs text-ink-3">Key lưu trên máy này, không gửi đi đâu khác.</p>
               <div id="keyQuota" class="space-y-1"></div>
             </div>
-          </section>
+          </details>
 
-          <section class="side-section">
-            <h2>Voice</h2>
+          <details class="side-section" data-fold="voice" open>
+            <summary>Voice</summary>
             <div class="space-y-2.5">
+              <div class="field"><span>Voice đã lưu</span>
+                <div class="flex gap-1.5">
+                  <select id="savedVoices" class="input"><option value="">— Chọn voice đã lưu —</option></select>
+                  <button id="saveVoiceBtn" class="btn" title="Lưu voice đang dùng">Lưu</button>
+                  <button id="removeVoiceBtn" class="btn" title="Bỏ voice đang chọn khỏi danh sách">Xoá</button>
+                </div>
+              </div>
               <div class="field"><span>Tên hoặc Voice ID</span>
                 <div class="flex gap-1.5"><input id="voiceName" class="input" placeholder="Tên voice hoặc Voice ID" /><button id="searchVoiceBtn" class="btn">Tìm</button></div>
               </div>
@@ -130,22 +137,22 @@
                 </label>
               </div>
             </div>
-          </section>
+          </details>
 
-          <section class="side-section">
-            <label class="check mb-2.5 font-semibold text-ink"><input id="useSettings" type="checkbox" checked /> Tuỳ chỉnh giọng</label>
+          <details class="side-section" data-fold="settings">
+            <summary>Tuỳ chỉnh giọng</summary>
+            <label class="check mb-2.5"><input id="useSettings" type="checkbox" checked /> Gửi tuỳ chỉnh khi render</label>
             <div class="grid grid-cols-2 gap-2">
               <label class="field"><span>Tốc độ</span><input id="speed" class="input" type="number" step="0.01" value="1.20" /></label>
-              <label class="field"><span>Stability</span><input id="stability" class="input" type="number" value="50" /></label>
-              <label class="field"><span>Similarity</span><input id="similarity" class="input" type="number" value="75" /></label>
-              <label class="field"><span>Style</span><input id="style" class="input" type="number" value="1" /></label>
+              <label class="field" data-own-key><span>Stability</span><input id="stability" class="input" type="number" value="50" /></label>
+              <label class="field" data-own-key><span>Similarity</span><input id="similarity" class="input" type="number" value="75" /></label>
+              <label class="field" data-own-key><span>Style</span><input id="style" class="input" type="number" value="1" /></label>
             </div>
-            <label class="check mt-2.5"><input id="speakerBoost" type="checkbox" checked /> Speaker boost</label>
-            <p class="mt-1.5 text-xs text-ink-3">AIVIE hiện chỉ nhận tốc độ và ngôn ngữ. Các ô còn lại dành cho model key riêng.</p>
-          </section>
+            <label class="check mt-2.5" data-own-key><input id="speakerBoost" type="checkbox" checked /> Speaker boost</label>
+          </details>
 
-          <section class="side-section border-b-0">
-            <h2>Tuỳ chọn chạy</h2>
+          <details class="side-section border-b-0" data-fold="run" open>
+            <summary>Tuỳ chọn chạy</summary>
             <div class="space-y-2">
               <label class="field"><span>Cách render</span>
                 <select id="renderMode" class="input">
@@ -167,7 +174,7 @@
               </div>
               <p class="text-xs text-ink-3">AIVIE cho phép tối đa <strong id="concurrentHint" class="font-medium text-ink-2">-</strong> job cùng lúc. Clip vẫn lưu đúng thư mục và số thứ tự dù xong không theo thứ tự.</p>
             </div>
-          </section>
+          </details>
 
           <!-- Giữ id để app.js hoạt động, nhưng ẩn khỏi giao diện -->
           <section class="side-section border-b-0" hidden>

@@ -37,6 +37,12 @@
   .td { @apply border-b border-line/60 px-3 py-1.5 align-top text-sm; }
   .side-section { @apply border-b border-line px-4 py-3; }
   .side-section > h2 { @apply mb-2.5 text-xs font-semibold text-ink; }
+  .side-section > summary { @apply -mx-4 -my-3 flex cursor-pointer select-none items-center justify-between px-4 py-3 text-xs font-semibold text-ink hover:text-brand; list-style: none; }
+  .side-section > summary::-webkit-details-marker { display: none; }
+  .side-section > summary::after { content: "▸"; @apply text-ink-3 transition-transform; }
+  .side-section[open] > summary { @apply mb-0; }
+  .side-section[open] > summary::after { transform: rotate(90deg); }
+  .side-section[open] > summary + * { @apply mt-3; }
   .file-link { @apply text-brand hover:text-brand-hover hover:underline; }
 }
 
