@@ -38,6 +38,9 @@
 @layer base {
   * { @apply border-border; }
   html, body, #root { height: 100%; overflow: hidden; color-scheme: dark; }
+  /* Chữ to hơn một chút: mọi cỡ chữ và khoảng cách theo rem tăng theo. */
+  html { font-size: 17px; }
+  body { letter-spacing: 0.015em; }
   body { @apply bg-background font-sans text-sm text-foreground antialiased; }
   ::selection { background: var(--primary); color: var(--primary-foreground); }
   * { scrollbar-width: thin; scrollbar-color: var(--accent) transparent; }

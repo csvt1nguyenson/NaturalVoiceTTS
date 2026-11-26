@@ -38,7 +38,7 @@ function Header() {
   return (
     <header className="flex items-center justify-between border-b px-4">
       <div className="flex items-baseline gap-3">
-        <span className="text-[15px] font-bold tracking-tight">NaturalVoice</span>
+        <span className="text-[16px] font-bold">NaturalVoice</span>
         <span className="text-xs text-muted-foreground">{ui.appVersion}</span>
         <span className="text-xs text-muted-foreground">Text &amp; subtitle sang giọng nói qua AIVIE</span>
       </div>
