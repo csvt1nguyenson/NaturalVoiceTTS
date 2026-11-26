@@ -635,6 +635,16 @@ impl Backend {
 
         let mut items = body.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
         items.sort_by_key(|i| i.get("part").and_then(Value::as_f64).unwrap_or(0.0) as i64);
+        let base = safe_name(body.get("baseName").and_then(Value::as_str).filter(|s| !s.is_empty()).unwrap_or("joined"));
+        let clip = |i: &Value| target_dir.join(format!("{}.mp3", safe_name(&i.get("part").map(value_to_string).unwrap_or_default())));
+        // Có khoảng lặng và đủ clip: ghép lại có chèn lặng, SRT theo thời lượng thật của từng clip.
+        let gap = body.get("gapSeconds").and_then(Value::as_f64).filter(|g| g.is_finite() && *g >= 0.0).map(|g| g.min(60.0));
+        if let Some(gap) = gap {
+            let files: Vec<PathBuf> = items.iter().map(clip).collect();
+            if !files.is_empty() && self.ffmpeg.exists() && files.iter().all(|p| p.exists()) {
+                return self.join_with_gap(&items, &files, gap, &base, &target_dir, &parent_dir, body);
+            }
+        }
 
         let mut cursor = 0.0f64;
         let mut srt = String::new();
@@ -651,7 +661,6 @@ impl Backend {
             srt.push_str(&format!("{}\n{} --> {}\n{}\n\n", index + 1, srt_time(start), srt_time(end), text));
         }
         let srt = srt.trim_end_matches('\n').to_string() + "\n";
-        let base = safe_name(body.get("baseName").and_then(Value::as_str).filter(|s| !s.is_empty()).unwrap_or("joined"));
         let srt_file = parent_dir.join(format!("{base}.srt"));
         let write_srt = body.get("writeSrt").and_then(Value::as_bool).unwrap_or(true);
         if write_srt { std::fs::write(&srt_file, &srt).map_err(|e| e.to_string())?; }
@@ -700,6 +709,51 @@ impl Backend {
             "joinedMp3": joined.as_ref().and_then(|p| p.file_name()).map(|s| s.to_string_lossy().to_string()),
             "joinedMp3Path": joined,
             "warning": warning
+        }))
+    }
+
+    fn probe_duration(&self, file: &Path) -> Option<f64> {
+        let out = run_hidden(&self.ffmpeg).args(["-hide_banner", "-i"]).arg(file).output().ok()?;
+        let text = String::from_utf8_lossy(&out.stderr);
+        let c = Regex::new(r"Duration: (\d+):(\d+):(\d+(?:\.\d+)?)").unwrap().captures(&text)?;
+        Some(c[1].parse::<f64>().ok()? * 3600.0 + c[2].parse::<f64>().ok()? * 60.0 + c[3].parse::<f64>().ok()?)
+    }
+
+    fn join_with_gap(&self, items: &[Value], files: &[PathBuf], gap: f64, base: &str, target_dir: &Path, parent_dir: &Path, body: &Value) -> ApiResult {
+        let mut srt = String::new();
+        let mut cursor = 0.0f64;
+        for (index, (item, file)) in items.iter().zip(files).enumerate() {
+            let dur = self.probe_duration(file).ok_or_else(|| format!("Không đọc được thời lượng {}", file.display()))?;
+            let text = item.get("text").and_then(Value::as_str).unwrap_or("");
+            srt.push_str(&format!("{}\n{} --> {}\n{}\n\n", index + 1, srt_time(cursor), srt_time(cursor + dur), text));
+            cursor += dur + gap;
+        }
+        let write_srt = body.get("writeSrt").and_then(Value::as_bool).unwrap_or(true);
+        let srt_file = parent_dir.join(format!("{base}.srt"));
+        if write_srt { std::fs::write(&srt_file, srt.trim_end_matches('\n').to_string() + "\n").map_err(|e| e.to_string())?; }
+        let out = parent_dir.join(format!("{base}_full.mp3"));
+        let mut cmd = run_hidden(&self.ffmpeg);
+        cmd.args(["-y", "-hide_banner"]);
+        for f in files { cmd.arg("-i").arg(f); }
+        let n = files.len();
+        let mut graph = String::new();
+        for i in 0..n {
+            let pad = if i + 1 < n && gap > 0.0 { format!(",apad=pad_dur={gap}") } else { String::new() };
+            graph.push_str(&format!("[{i}:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo{pad}[a{i}];"));
+        }
+        for i in 0..n { graph.push_str(&format!("[a{i}]")); }
+        graph.push_str(&format!("concat=n={n}:v=0:a=1[out]"));
+        let output = cmd.args(["-filter_complex", &graph, "-map", "[out]", "-c:a", "libmp3lame", "-b:a", "192k"]).arg(&out)
+            .current_dir(parent_dir).output().map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(stderr.lines().rev().take(3).collect::<Vec<_>>().join(" | "));
+        }
+        Ok(json!({
+            "targetDir": target_dir, "parentDir": parent_dir,
+            "srt": if write_srt { srt_file.file_name().map(|s| s.to_string_lossy().to_string()) } else { None },
+            "srtPath": if write_srt { Some(&srt_file) } else { None },
+            "joinedMp3": out.file_name().map(|s| s.to_string_lossy().to_string()), "joinedMp3Path": out, "warning": ""
         }))
     }
 

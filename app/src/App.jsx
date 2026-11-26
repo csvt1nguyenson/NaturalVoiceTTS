@@ -150,6 +150,7 @@ const Sidebar = memo(function Sidebar() {
           <option value="file">Cả file trong 1 job → 1 file MP3</option>
         </Select></Field>
         <Check id="autoSrt" label="Tự tạo SRT và ghép full MP3" />
+        <Field label="Khoảng lặng giữa các câu khi ghép (giây)" title="0.5: đọc liền mạch. 4: chừa chỗ chèn nhạc (4K documentary)."><Input id="joinGap" type="number" min="0" max="60" step="0.1" defaultValue="0.5" /></Field>
         <Check id="loopMode" label="Tự chạy lại khi lỗi" />
         <Check id="autoSplit" label="Tự tách câu file lẻ" />
         <Check id="estimateBeforeRender" label="Ước tính credit trước khi render" />

@@ -529,7 +529,35 @@ function runProcess(command, args, cwd) {
   });
 }
 
-async function joinMp3AndCreateSrt({ outputFolder, items, baseName }) {
+async function probeDuration(file) {
+  const text = await new Promise((resolve, reject) => {
+    const child = spawn(ffmpegPath, ["-hide_banner", "-i", file], { windowsHide: true });
+    let err = ""; child.stderr.on("data", (c) => { err += c; }); child.on("error", reject); child.on("close", () => resolve(err));
+  });
+  const m = /Duration: (\d+):(\d+):(\d+(?:\.\d+)?)/.exec(text);
+  if (!m) throw new Error(`Không đọc được thời lượng ${file}`);
+  return Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
+}
+
+// Ghép có chèn khoảng lặng; SRT theo thời lượng thật của từng clip.
+async function joinWithGap(ordered, files, gap, safeBase, targetDir, parentDir) {
+  let cursor = 0; const lines = [];
+  for (let i = 0; i < files.length; i++) {
+    const dur = await probeDuration(files[i]);
+    lines.push(`${i + 1}\n${srtTime(cursor)} --> ${srtTime(cursor + dur)}\n${ordered[i].text || ""}\n`);
+    cursor += dur + gap;
+  }
+  const srtFile = path.join(parentDir, `${safeBase}.srt`);
+  await writeFile(srtFile, lines.join("\n"), "utf8");
+  const joinedMp3 = path.join(parentDir, `${safeBase}_full.mp3`);
+  const n = files.length;
+  const graph = files.map((_, i) => `[${i}:a]aresample=44100,aformat=sample_fmts=fltp:channel_layouts=stereo${i + 1 < n && gap > 0 ? `,apad=pad_dur=${gap}` : ""}[a${i}];`).join("")
+    + files.map((_, i) => `[a${i}]`).join("") + `concat=n=${n}:v=0:a=1[out]`;
+  await runProcess(ffmpegPath, ["-y", "-hide_banner", ...files.flatMap((f) => ["-i", f]), "-filter_complex", graph, "-map", "[out]", "-c:a", "libmp3lame", "-b:a", "192k", joinedMp3], parentDir);
+  return { targetDir, parentDir, srt: path.basename(srtFile), srtPath: srtFile, joinedMp3: path.basename(joinedMp3), joinedMp3Path: joinedMp3, warning: "" };
+}
+
+async function joinMp3AndCreateSrt({ outputFolder, items, baseName, gapSeconds }) {
   const targetDir = resolveTargetDirectory(outputFolder || "single-import");
   await mkdir(targetDir, { recursive: true });
   // Thư mục cha (nơi chứa file txt gốc hoặc thư mục gốc chứa folder voice con)
@@ -537,6 +565,11 @@ async function joinMp3AndCreateSrt({ outputFolder, items, baseName }) {
   await mkdir(parentDir, { recursive: true });
 
   const ordered = [...(items || [])].sort((a, b) => Number(a.part || 0) - Number(b.part || 0));
+  const gap = Number(gapSeconds);
+  if (gapSeconds !== undefined && gapSeconds !== null && gapSeconds !== "" && Number.isFinite(gap) && gap >= 0 && ordered.length && existsSync(ffmpegPath)) {
+    const files = ordered.map((item) => path.join(targetDir, `${safeName(item.part || "")}.mp3`));
+    if (files.every((file) => existsSync(file))) return joinWithGap(ordered, files, Math.min(gap, 60), safeName(baseName || "joined"), targetDir, parentDir);
+  }
   let cursor = 0;
   const srt = ordered.map((item, index) => {
     const parsedStart = parseSrtTime(item.startTime);

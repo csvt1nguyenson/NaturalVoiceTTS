@@ -426,7 +426,9 @@ function addSingleEntries(entries, mode = "single") {
     const relative = entry.relativePath || entry.name;
     if (alreadyLoaded(source, entry.name)) continue;
     registerBatchFile(source, fileStem(entry.name));
-    const folder = mode === "folder" ? `folder-import/${fileStem(relative)}` : `single-import/${fileStem(entry.name)}`;
+    // Có đường dẫn thật (desktop): lưu cạnh file gốc như khi Quét thư mục.
+    const dir = entry.fullPath ? entry.fullPath.replace(/[\\/][^\\/]*$/, "") : "";
+    const folder = dir ? `${dir}\\${fileStem(entry.name)}` : mode === "folder" ? `folder-import/${fileStem(relative)}` : `single-import/${fileStem(entry.name)}`;
     chunks.forEach((chunk, index) => state.items.push({
       text: chunk.text,
       startTime: chunk.startTime || "",
@@ -1306,6 +1308,8 @@ async function downloadSrt(targetItems = visibleItems()) {
   }
 }
 
+// Khoảng lặng giữa các câu khi ghép (giây). VD 0.5 đọc liền, 4 chừa chỗ chèn nhạc.
+function joinGap() { const v = Number($("joinGap")?.value); return Number.isFinite(v) && v >= 0 ? Math.min(v, 60) : 0.5; }
 async function joinItems(items = visibleItems(), includeMp3 = true) {
   if (!items.length) {
     log("Không có dòng nào để Join Mp3 & Tạo srt.");
@@ -1318,6 +1322,7 @@ async function joinItems(items = visibleItems(), includeMp3 = true) {
     body: JSON.stringify({
       outputFolder: first.outputFolder || "single-import",
       baseName: fileStem(first.fileName || first.source || "joined"),
+      gapSeconds: joinGap(),
       items: items.map((item) => ({ part: item.part, text: item.text, startTime: item.startTime, endTime: item.endTime }))
     })
   });
@@ -1479,6 +1484,7 @@ export function boot() {
     try { const value = localStorage.getItem(`nv.${id}`); if (value !== null) el.checked = value === "1"; } catch {}
     el.addEventListener("change", () => { try { localStorage.setItem(`nv.${id}`, el.checked ? "1" : "0"); } catch {} });
   }
+  { const el = $("joinGap"); try { const v = localStorage.getItem("nv.joinGap"); if (v !== null && el) el.value = v; } catch {} el?.addEventListener("change", () => { try { localStorage.setItem("nv.joinGap", el.value); } catch {} }); }
   syncOwnKeyFields(); renderSavedVoices(); bootConnection();
 }
 export const selectors = { voiceModels, visibleItems, fileStatus, statusView, isDone, isActive, summary: () => {
