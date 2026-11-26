@@ -11,7 +11,7 @@ export const state = {
   concurrentLimit: 0,
   batchMode: false,
   pausedUntil: 0,
-  ui: { logs: [], logCount: 0, connection: { kind: "off", text: "Chưa kết nối" }, credit: "-", concurrentLimit: "-", quota: null, statusLabel: "Sẵn sàng", statusOutput: "", voiceMeta: "Chưa chọn voice.", keyHint: "Key lưu trên máy này.", savedVoices: [], voiceToSave: null, jobs: [], jobsOpen: false, modal: null, update: null }
+  ui: { logs: [], logCount: 0, connection: { kind: "off", text: "Chưa kết nối" }, credit: "-", concurrentLimit: "-", quota: null, statusLabel: "Sẵn sàng", statusOutput: "", voiceMeta: "Chưa chọn voice.", keyHint: "Key lưu trên máy này.", savedVoices: [], voiceToSave: null, confirm: null, jobs: [], jobsOpen: false, modal: null, update: null }
 };
 const listeners = new Set();
 let version = 0, scheduled = false;
@@ -699,8 +699,12 @@ function askAcceptV2(message) {
 async function startRender(body, holder, keyName) {
   const send = async () => {
     const k = acceptV2 ? `${keyName}V2` : keyName;
-    body.args.idempotency_key = holder[k] || (holder[k] = crypto.randomUUID());
     if (acceptV2) body.args.accept_v2 = true;
+    // Mã chống trùng chỉ dùng lại khi nội dung y hệt; đổi model/giọng/text thì AIVIE báo "đã dùng cho nội dung khác".
+    const { idempotency_key, ...rest } = body.args;
+    const sig = JSON.stringify(rest);
+    if (holder[`${k}Sig`] !== sig) { holder[k] = crypto.randomUUID(); holder[`${k}Sig`] = sig; }
+    body.args.idempotency_key = holder[k];
     const res = await apiFetch("/api/start-render", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     const data = await res.json();
     if (!res.ok || data.error) throw new Error(data.error || "Start render failed");
@@ -735,6 +739,8 @@ async function waitForPendingJob(holder, jobId, target) {
     return result;
   } catch (error) {
     if (error.jobEnded) holder.pendingJob = null;
+    // Job kẹt hàng chờ AIVIE: lần chạy lại tạo job mới ngay (mã chống trùng mới), không chờ lại job cũ.
+    if (error.stale) for (const key of Object.keys(holder)) if (key.endsWith("Sig")) delete holder[key];
     throw error;
   }
 }
@@ -840,7 +846,7 @@ async function pollActiveJobs() {
       }
       else {
         entry.item.status = r.status === "rendering" ? "Rendering" : `AIVIE ${r.status}`;
-        if (Date.now() - entry.since > 15 * 60 * 1000) { activeJobs.delete(id); entry.reject(new Error(`AIVIE job ${id} chờ quá 15 phút, bỏ qua.`)); }
+        if (Date.now() - entry.since > 15 * 60 * 1000) { activeJobs.delete(id); entry.reject(Object.assign(new Error(`AIVIE job ${id} chờ quá 15 phút, bỏ qua.`), { jobEnded: true, stale: true })); }
       }
     }
     renderBatchFiles(); renderRows();
@@ -1095,17 +1101,17 @@ async function runPool(queue, label, onItemDone) {
 
 // Chạy lại riêng các dòng lỗi được chọn (một dòng, hoặc mọi dòng lỗi của một file).
 // Dòng đã xong giữ nguyên; file đủ dòng thì tự ghép lại full MP3 + SRT.
-async function retryItems(items) {
+async function retryItems(items, all = false) {
   if (state.running) return log("Đang chạy. Chờ xong hoặc bấm Stop rồi mới chạy lại dòng lỗi.");
   if (!$("toolSelect").value) return log("Chưa kết nối AIVIE.");
-  const targets = items.filter((item) => item && item.status === "Error");
+  const targets = items.filter((item) => item && (all || item.status === "Error"));
   if (!targets.length) return log("Không có dòng lỗi để chạy lại.");
   if (!await validateVoiceModel()) return;
   targets.forEach((item) => { item.status = "Queued"; item.error = ""; });
   state.running = true; state.batchMode = true;
   renderBatchFiles(); renderRows(); updateStatusBar();
   const label = fileStem(targets[0].fileName || targets[0].source || "");
-  log(`Chạy lại ${targets.length} dòng lỗi của ${label}.`);
+  log(`Chạy lại ${targets.length} dòng${all ? "" : " lỗi"} của ${label}.`);
   try {
     if (renderMode() === "file") {
       const sources = [...new Set(targets.map((item) => item.source))];
@@ -1352,6 +1358,26 @@ function isRateLimitError(error) {
 }
 
 const safe = (fn) => (...args) => Promise.resolve().then(() => fn(...args)).catch((e) => log(e.message));
+// Chạy xong thì cập nhật credit; lỗi cập nhật không che lỗi chính.
+const runThenBalance = (fn) => safe(async (...args) => { try { await fn(...args); } finally { if ($("toolSelect")?.value) await refreshBalance().catch(() => {}); } });
+// Render lại: bỏ job cũ và mã chống trùng, nếu không AIVIE trả lại đúng job cũ.
+function rerender(items) {
+  const targets = items.filter(Boolean);
+  if (state.running) return log("Đang chạy. Chờ xong hoặc bấm Stop rồi mới render lại.");
+  if (!targets.length) return;
+  const close = () => { state.ui.confirm = null; notify(); };
+  state.ui.confirm = {
+    title: `Render lại ${targets.length} dòng?`,
+    message: "Tốn credit như render mới. File mp3 cũ sẽ bị thay khi bản mới tải xong.",
+    cancel: close,
+    ok: () => {
+      close();
+      for (const item of targets) { item.pendingJob = null; for (const key of Object.keys(item)) if (key.endsWith("Sig")) delete item[key]; }
+      runThenBalance(() => retryItems(targets, true))();
+    }
+  };
+  notify();
+}
 export const actions = {
   connect: safe(async () => { try { await connect(); await refreshBalance(); } catch (e) { setConnection("err", "Kết nối lỗi"); throw e; } }),
   saveKey: safe(saveKey), clearKey: safe(clearKey), refreshBalance: safe(refreshBalance),
@@ -1362,9 +1388,9 @@ export const actions = {
   addBatchFiles: (files) => addBatchFolder(files), scanBatchPath: safe(scanBatchPath),
   clearBatch: () => { if (state.running) return log("Đang chạy, hãy Stop trước khi xoá danh sách."); state.items = []; state.batchFiles = []; state.activeSource = ""; renderRows(); renderBatchFiles(); },
   selectFile: (source) => { state.activeSource = source; renderRows(); renderBatchFiles(); },
-  runBatch: safe(runBatchJobs), start: safe(startQueue), stop: stopAll, retryErrors, retryItem: safe((index) => retryItems([state.items[Number(index)]])),
-  retryAll: safe(() => retryItems(state.items.filter((item) => item.status === "Error"))),
-  retryFile: safe((source) => retryItems(state.items.filter((item) => item.source === source))),
+  runBatch: runThenBalance(runBatchJobs), start: runThenBalance(startQueue), stop: stopAll, retryErrors, rerender, retryItem: runThenBalance((index) => retryItems([state.items[Number(index)]])),
+  retryAll: runThenBalance(() => retryItems(state.items.filter((item) => item.status === "Error"))),
+  retryFile: runThenBalance((source) => retryItems(state.items.filter((item) => item.source === source))),
   importFile: safe(async () => { if (!await pickAndImportSingle("single")) $("singleFileInput").click(); }),
   importFolder: safe(async () => { if (!await pickAndImportSingle("folder")) $("singleFolderInput").click(); }),
   importVoice: () => log("Import Voice sẽ dùng khi có file voice library/template. Hiện chưa cần cho queue TTS."),

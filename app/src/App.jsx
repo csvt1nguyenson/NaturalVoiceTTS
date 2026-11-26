@@ -133,7 +133,7 @@ const Sidebar = memo(function Sidebar() {
 
       <Fold id="settings" title="Tuỳ chỉnh giọng">
         <Check id="useSettings" label="Gửi tuỳ chỉnh khi render" defaultChecked />
-        <Field label="Tốc độ"><Input id="speed" type="number" step="0.01" defaultValue="1.20" /></Field>
+        <Field label="Tốc độ"><Input id="speed" type="number" step="0.01" defaultValue="1" /></Field>
         <OwnKey>
           <div className="grid grid-cols-3 gap-2">
             <Field label="Stability"><Input id="stability" type="number" defaultValue="50" /></Field>
@@ -242,13 +242,13 @@ function FileList() {
 }
 
 // Item bị engine sửa tại chỗ nên truyền từng giá trị, chỉ dòng đổi mới render lại.
-const QueueRow = memo(function QueueRow({ part, text, title, status, error, path, name, itemIndex }) {
+const QueueRow = memo(function QueueRow({ part, text, title, status, error, path, name, itemIndex, done }) {
   const view = selectors.statusView(status, error);
   return (
     <TableRow>
       <TableCell className="text-muted-foreground">{part || ""}</TableCell>
       <TableCell className="whitespace-normal break-words" title={title}>{text}</TableCell>
-      <TableCell><Pill kind={view.kind} title={view.title}>{view.label}</Pill>{itemIndex >= 0 && <Btn size="xs" className="ml-1" title="Chỉ chạy lại dòng này" onClick={() => actions.retryItem(itemIndex)}>Chạy lại</Btn>}</TableCell>
+      <TableCell><Pill kind={view.kind} title={view.title}>{view.label}</Pill>{itemIndex >= 0 && <Btn size="xs" className="ml-1" title={done ? "Render lại dòng này, thay file cũ" : "Chỉ chạy lại dòng này"} onClick={() => done ? actions.rerender([state.items[itemIndex]]) : actions.retryItem(itemIndex)}>{done ? "Render lại" : "Chạy lại"}</Btn>}</TableCell>
       <TableCell>{!name ? "—" : desktop
         ? <button type="button" className="text-primary hover:underline" onClick={() => actions.openPath(path)}>{name}</button>
         : <a className="text-primary hover:underline" target="_blank" rel="noreferrer" href={`/api/download-file?path=${encodeURIComponent(path)}`}>{name}</a>}</TableCell>
@@ -263,7 +263,7 @@ function QueueRows() {
     const out = item.output || "";
     const path = item.fullPath || (!out || out.includes(":\\") || out.startsWith("\\\\") ? out : `${item.outputFolder}/${out}`);
     return <QueueRow key={i} part={item.part} text={item.text} title={item.fileName || item.source} status={item.status} error={item.error}
-      path={path} name={out.split(/[\\/]/).pop()} itemIndex={item.status === "Error" ? state.items.indexOf(item) : -1} />;
+      path={path} name={out.split(/[\\/]/).pop()} itemIndex={item.status === "Error" || selectors.isDone(item) ? state.items.indexOf(item) : -1} done={selectors.isDone(item)} />;
   });
 }
 function Lines() {
@@ -279,6 +279,7 @@ function Lines() {
         <h2 className="min-w-0 truncate text-sm font-semibold">{name || "Chi tiết"} {!none && <span className="ml-1 font-normal text-muted-foreground">{s.done} / {s.total} xong{s.errors ? ` · ${s.errors} lỗi` : ""}</span>}</h2>
         <div className="flex flex-wrap items-center gap-1.5">
           <Btn size="xs" disabled={state.running || !todo} title="Chỉ chạy file đang chọn" onClick={actions.start}>Chạy file này</Btn>
+          <Btn size="xs" disabled={state.running || none} title="Render lại mọi dòng của file đang chọn, thay file cũ" onClick={() => actions.rerender(items)}>Render lại file</Btn>
           <span className="mx-1 h-4 w-px bg-border" />
           <Btn size="xs" disabled={none} onClick={actions.join}>Ghép MP3 + SRT</Btn>
           <Btn size="xs" disabled={none} onClick={actions.saveSrt}>Chỉ tạo SRT</Btn>
@@ -366,11 +367,15 @@ const Dialog = ({ title, desc, children, footer, onEscape }) => (
 );
 function Dialogs() {
   useStore();
-  const { modal, update, voiceToSave } = state.ui;
+  const { modal, update, voiceToSave, confirm } = state.ui;
   if (modal) return (
     <Dialog title="Render bằng Multilingual v2?" desc={modal.message} footer={<><Btn onClick={modal.cancel}>Huỷ</Btn><Btn variant="default" onClick={modal.confirm}>Đồng ý</Btn></>}>
       <p className="text-xs text-muted-foreground">Đồng ý: áp dụng cho mọi dòng còn lại tới khi đóng app; audio tag như [pause] sẽ bị bỏ vì v2 đọc thành tiếng. Huỷ: dừng lần chạy này.</p>
     </Dialog>
+  );
+  if (confirm) return (
+    <Dialog title={confirm.title} desc={confirm.message} onEscape={confirm.cancel}
+      footer={<><Btn onClick={confirm.cancel}>Huỷ</Btn><Btn variant="default" onClick={confirm.ok}>Render lại</Btn></>} />
   );
   if (voiceToSave) return (
     <Dialog title="Lưu voice" desc={`${voiceToSave.name}. Đặt tên kênh để dễ phân biệt; để trống thì dùng tên voice. Trùng tên kênh thì thay voice cũ.`} onEscape={actions.cancelSaveVoice}

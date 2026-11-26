@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { readFile, mkdir, writeFile, readdir, stat, unlink, appendFile } from "node:fs/promises";
+import { readFile, mkdir, writeFile, readdir, stat, unlink, appendFile, rename } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import path from "node:path";
@@ -361,7 +361,12 @@ async function downloadJobAudio(jobId, fullPath) {
   const response = await fetch(audioUrl);
   if (!response.ok) throw new Error(`Download audio HTTP ${response.status}`);
   await mkdir(path.dirname(fullPath), { recursive: true });
-  await writeFile(fullPath, Buffer.from(await response.arrayBuffer()));
+  const bytes = Buffer.from(await response.arrayBuffer());
+  if (!bytes.length) throw new Error("Audio tải về rỗng.");
+  // File tạm rồi mới thay file cũ: lỗi giữa chừng không làm mất clip đang có.
+  const tmp = `${fullPath}.part`;
+  await writeFile(tmp, bytes);
+  try { await rename(tmp, fullPath); } catch (e) { await unlink(tmp).catch(() => {}); throw e; }
   return audioUrl;
 }
 
@@ -437,8 +442,10 @@ async function pollAivieRender(jobId) {
   const data = contentJson(result);
   const status = data.status || data.job?.status || "unknown";
   if (status === "completed") {
-    if (!existsSync(local.fullPath)) {
+    // Không dựa vào file có sẵn: render lại phải thay file cũ.
+    if (!local.downloaded) {
       await downloadJobAudio(jobId, local.fullPath);
+      local.downloaded = true;
     }
     return {
       status,
@@ -757,7 +764,7 @@ const server = createServer(async (req, res) => {
             const local = renderJobs.get(id);
             if (!local) { out[id] = { status, error: "Không tìm thấy local render job." }; continue; }
             try {
-              if (!existsSync(local.fullPath)) await downloadJobAudio(id, local.fullPath);
+              if (!local.downloaded) { await downloadJobAudio(id, local.fullPath); local.downloaded = true; }
               out[id] = { status, duration: job.duration_seconds ?? null, saved: { filename: local.filename, fullPath: local.fullPath, jobId: id } };
             } catch (e) {
               out[id] = /chưa sẵn sàng|not_ready|HTTP 404/.test(e.message) ? { status: "finalizing" } : { status, error: e.message };

@@ -127,6 +127,19 @@ test("saved voices are keyed by channel name", () => {
   assert.equal(show(up(list, { id: "y", label: "A" })), "A:y,B:x");
 });
 
+test("idempotency key changes only when the request content changes", async () => {
+  const sent = [];
+  const c = load(["async function startRender("], {
+    acceptV2: false, crypto: { randomUUID: (() => { let n = 0; return () => `k${++n}`; })() },
+    apiFetch: async (_u, o) => { sent.push(JSON.parse(o.body).args.idempotency_key); return { ok: true, json: async () => ({ jobId: "j" }) }; }
+  });
+  const holder = {};
+  await c.startRender({ args: { text: "a", model: "v4" } }, holder, "idempotencyKey");
+  await c.startRender({ args: { text: "a", model: "v4" } }, holder, "idempotencyKey");
+  await c.startRender({ args: { text: "a", model: "v3" } }, holder, "idempotencyKey");
+  assert.deepEqual(sent, ["k1", "k1", "k2"]);
+});
+
 test("engine import exposes a quiet store without browser globals", () => {
   const code = `import { state, subscribe, getVersion, notify, actions, selectors, boot } from './src/engine.js';
     if (getVersion() !== 0 || state.items.length || !state.ui || typeof boot !== 'function' || !actions.start || !selectors.visibleItems) process.exit(2);

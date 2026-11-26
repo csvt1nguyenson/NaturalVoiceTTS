@@ -32,6 +32,8 @@ struct McpSession {
 struct RenderJob {
     filename: String,
     full_path: PathBuf,
+    /// Đã tải audio của job này chưa. Không dựa vào file có sẵn: render lại phải thay file cũ.
+    downloaded: bool,
 }
 
 /// Lượt tạo job đã dùng của từng key (theo đuôi key), tính trong 1 giờ trượt.
@@ -420,6 +422,12 @@ impl Backend {
         Err("AIVIE job timeout.".into())
     }
 
+    fn mark_downloaded(&self, job_id: &str) {
+        if let Some(j) = self.render_jobs.lock().unwrap().get_mut(job_id) {
+            j.downloaded = true;
+        }
+    }
+
     async fn download_job_audio(&self, job_id: &str, full_path: &Path) -> Result<String, String> {
         let link = self.call_tool("get_audio_link", json!({ "job_id": job_id, "format": "mp3" })).await?;
         let data = content_json(&link);
@@ -436,7 +444,16 @@ impl Backend {
         if let Some(parent) = full_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-        std::fs::write(full_path, &bytes).map_err(|e| e.to_string())?;
+        if bytes.is_empty() {
+            return Err("Audio tải về rỗng.".into());
+        }
+        // Ghi ra file tạm rồi mới thay file cũ, lỗi giữa chừng không làm mất clip đang có.
+        let tmp = full_path.with_extension("mp3.part");
+        std::fs::write(&tmp, &bytes).map_err(|e| e.to_string())?;
+        if let Err(e) = std::fs::rename(&tmp, full_path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.to_string());
+        }
         Ok(url)
     }
 
@@ -494,22 +511,23 @@ impl Backend {
         let tool = body.get("tool").and_then(Value::as_str).filter(|t| *t == "create_lines_job").unwrap_or("create_tts_job");
         let result = self.call_tool(tool, args).await?;
         let job_id = find_job_id(&result).ok_or("AIVIE không trả job_id.")?;
-        self.render_jobs.lock().unwrap().insert(job_id.clone(), RenderJob { filename: filename.clone(), full_path });
+        self.render_jobs.lock().unwrap().insert(job_id.clone(), RenderJob { filename: filename.clone(), full_path, downloaded: false });
         Ok(json!({ "jobId": job_id, "status": "queued", "filename": filename, "result": result }))
     }
 
     async fn poll_render(&self, job_id: &str) -> ApiResult {
-        let (filename, full_path) = {
+        let (filename, full_path, downloaded) = {
             let jobs = self.render_jobs.lock().unwrap();
             let j = jobs.get(job_id).ok_or("Không tìm thấy local render job.")?;
-            (j.filename.clone(), j.full_path.clone())
+            (j.filename.clone(), j.full_path.clone(), j.downloaded)
         };
         let result = self.call_tool("get_job", json!({ "job_id": job_id })).await?;
         let data = content_json(&result);
         let status = job_status(&data);
         if status == "completed" {
-            if !full_path.exists() {
+            if !downloaded {
                 self.download_job_audio(job_id, &full_path).await?;
+                self.mark_downloaded(job_id);
             }
             return Ok(json!({
                 "status": status, "job": data,
@@ -557,11 +575,11 @@ impl Backend {
             if status == "completed" {
                 let local = {
                     let jobs = self.render_jobs.lock().unwrap();
-                    jobs.get(id).map(|j| (j.filename.clone(), j.full_path.clone()))
+                    jobs.get(id).map(|j| (j.filename.clone(), j.full_path.clone(), j.downloaded))
                 };
                 match local {
-                    Some((filename, full_path)) => {
-                        if !full_path.exists() {
+                    Some((filename, full_path, downloaded)) => {
+                        if !downloaded {
                             if let Err(e) = self.download_job_audio(id, &full_path).await {
                                 // AIVIE báo completed nhưng audio chưa lên CDN: chờ tiếp ở lượt poll sau.
                                 if e.contains("chưa sẵn sàng") || e.contains("not_ready") || e.contains("HTTP 404") {
@@ -571,6 +589,7 @@ impl Backend {
                                 }
                                 continue;
                             }
+                            self.mark_downloaded(id);
                         }
                         let duration = job.get("duration_seconds").cloned().unwrap_or(Value::Null);
                         out.insert(id.clone(), json!({ "status": "completed", "duration": duration, "saved": { "filename": filename, "fullPath": full_path, "jobId": id } }));
