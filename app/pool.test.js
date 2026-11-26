@@ -129,7 +129,7 @@ test("saved voices are keyed by channel name", () => {
 
 test("idempotency key changes only when the request content changes", async () => {
   const sent = [];
-  const c = load(["async function startRender("], {
+  const c = load(["let v3Works"], {
     acceptV2: false, crypto: { randomUUID: (() => { let n = 0; return () => `k${++n}`; })() },
     apiFetch: async (_u, o) => { sent.push(JSON.parse(o.body).args.idempotency_key); return { ok: true, json: async () => ({ jobId: "j" }) }; }
   });
@@ -138,6 +138,28 @@ test("idempotency key changes only when the request content changes", async () =
   await c.startRender({ args: { text: "a", model: "v4" } }, holder, "idempotencyKey");
   await c.startRender({ args: { text: "a", model: "v3" } }, holder, "idempotencyKey");
   assert.deepEqual(sent, ["k1", "k1", "k2"]);
+});
+
+test("v4 maintenance tries v3 once, then falls back to asking for v2", async () => {
+  const models = []; let v3ok = true;
+  const c = load(["let v3Works"], {
+    acceptV2: false, isV2OnlyError: (e) => /v2/.test(e.message), askAcceptV2: async () => false, crypto: { randomUUID: () => "k" },
+    apiFetch: async (_u, o) => { const m = JSON.parse(o.body).args.model; models.push(m); const bad = m.includes("v4") || (m.includes("v3") && !v3ok);
+      return { ok: !bad, json: async () => (bad ? { error: "v2 only" } : { jobId: "j" }) }; }
+  });
+  await c.startRender({ args: { model: "eleven_v4_b" } }, {}, "k");
+  await c.startRender({ args: { model: "eleven_v4_b" } }, {}, "k");
+  assert.deepEqual(models, ["eleven_v4_b", "eleven_v3_b", "eleven_v3_b"]);
+  v3ok = false; models.length = 0;
+  const d = load(["let v3Works"], { ...c, v3Works: null });
+  await assert.rejects(() => d.startRender({ args: { model: "eleven_v4" } }, {}, "k"));
+});
+
+test("eta guesses only after a line finishes", () => {
+  const { eta, clock } = load(["function clock(", "function eta("], {});
+  assert.equal(eta({ start: 0, done0: 5 }, 5, 10, 60000).left, null);
+  assert.equal(eta({ start: 0, done0: 5 }, 7, 10, 60000).left, 300);
+  assert.equal(clock(3725), "1:02:05"); assert.equal(clock(65), "1:05");
 });
 
 test("engine import exposes a quiet store without browser globals", () => {

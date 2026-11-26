@@ -199,12 +199,16 @@ function RunBar() {
   const errors = items.filter((item) => item.status === "Error").length;
   const done = items.filter(selectors.isDone).length;
   const active = items.filter(selectors.isActive).length;
+  const [, tick] = useState(0);
+  useEffect(() => { if (!running) return; const t = setInterval(() => tick((n) => n + 1), 1000); return () => clearInterval(t); }, [running]);
+  const run = state.ui.run && selectors.eta(state.ui.run, done, items.length - done - errors);
+  const timing = run ? ` · ${selectors.clock(run.elapsed)} đã chạy${run.left != null ? ` · còn ~${selectors.clock(run.left)}` : ""}` : "";
   return (
     <div className="flex items-center gap-2 px-3 py-2">
       <Btn variant="default" disabled={running || !todo} onClick={actions.runBatch}>Chạy tất cả{todo ? ` (${todo} dòng)` : ""}</Btn>
       <Btn disabled={running || !errors} title="Chạy lại ngay các dòng lỗi của mọi file" onClick={actions.retryAll}>Chạy lại lỗi{errors ? ` (${errors})` : ""}</Btn>
       <Progress aria-label="Tiến độ" value={items.length ? Math.round((done / items.length) * 100) : 0} className="mx-2 h-2 flex-1" />
-      <span className="shrink-0 text-xs text-muted-foreground tabular-nums">{done} / {items.length} xong · {active} đang chạy{errors ? ` · ${errors} lỗi` : ""}</span>
+      <span className="shrink-0 text-xs text-muted-foreground tabular-nums">{done} / {items.length} xong · {active} đang chạy{errors ? ` · ${errors} lỗi` : ""}{timing}{!running && state.ui.lastRun ? ` · Lần chạy vừa rồi: ${state.ui.lastRun}` : ""}</span>
       <Danger disabled={!running} onClick={actions.stop}>Stop</Danger>
     </div>
   );

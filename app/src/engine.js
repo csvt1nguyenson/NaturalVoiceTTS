@@ -11,7 +11,7 @@ export const state = {
   concurrentLimit: 0,
   batchMode: false,
   pausedUntil: 0,
-  ui: { logs: [], logCount: 0, connection: { kind: "off", text: "Chưa kết nối" }, credit: "-", concurrentLimit: "-", quota: null, statusLabel: "Sẵn sàng", statusOutput: "", voiceMeta: "Chưa chọn voice.", keyHint: "Key lưu trên máy này.", savedVoices: [], voiceToSave: null, confirm: null, jobs: [], jobsOpen: false, modal: null, update: null }
+  ui: { logs: [], logCount: 0, connection: { kind: "off", text: "Chưa kết nối" }, credit: "-", concurrentLimit: "-", quota: null, statusLabel: "Sẵn sàng", statusOutput: "", voiceMeta: "Chưa chọn voice.", keyHint: "Key lưu trên máy này.", savedVoices: [], voiceToSave: null, confirm: null, run: null, lastRun: "", jobs: [], jobsOpen: false, modal: null, update: null }
 };
 const listeners = new Set();
 let version = 0, scheduled = false;
@@ -698,7 +698,11 @@ function askAcceptV2(message) {
   return v2Prompt;
 }
 // Gọi /api/start-render. Idempotency key lưu ở holder[keyName]; khi có accept_v2 dùng key riêng vì nội dung gửi đã khác.
+// V4 bảo trì: thử v3 (vẫn đọc audio tag) trước khi hỏi v2. Nhớ kết quả tới khi đóng app.
+let v3Works = null;
+const v3Of = (model) => (/^eleven_v4(_b)?$/.test(model || "") ? model.replace("v4", "v3") : "");
 async function startRender(body, holder, keyName) {
+  if (v3Works === true && v3Of(body.args.model)) body.args.model = v3Of(body.args.model);
   const send = async () => {
     const k = acceptV2 ? `${keyName}V2` : keyName;
     if (acceptV2) body.args.accept_v2 = true;
@@ -715,6 +719,19 @@ async function startRender(body, holder, keyName) {
   try { return await send(); }
   catch (error) {
     if (!isV2OnlyError(error) || body.args.accept_v2) throw error;
+    const v4 = body.args.model, v3 = v3Works === false ? "" : v3Of(v4);
+    if (v3) {
+      body.args.model = v3;
+      try {
+        const data = await send();
+        if (v3Works !== true) log(`Eleven v4 đang bảo trì, chuyển sang ${v3} tới khi đóng app.`);
+        v3Works = true;
+        return data;
+      } catch (e) {
+        if (!isV2OnlyError(e)) throw e;
+        v3Works = false; body.args.model = v4;
+      }
+    }
     if (!await askAcceptV2(error.message)) throw new Error("Không đồng ý render bằng v2 (v3/v4 đang bảo trì).");
     return await send();
   }
@@ -1363,8 +1380,32 @@ function isRateLimitError(error) {
 }
 
 const safe = (fn) => (...args) => Promise.resolve().then(() => fn(...args)).catch((e) => log(e.message));
-// Chạy xong thì cập nhật credit; lỗi cập nhật không che lỗi chính.
-const runThenBalance = (fn) => safe(async (...args) => { try { await fn(...args); } finally { if ($("toolSelect")?.value) await refreshBalance().catch(() => {}); } });
+// Chạy xong: cập nhật credit và ghi tổng kết (số dòng, lỗi, thời gian, credit đã dùng).
+const runThenBalance = (fn) => safe(async (...args) => {
+  const credit0 = Number(state.ui.credit), done0 = state.items.filter(isDone).length, start = Date.now();
+  state.ui.run = { start, done0 }; state.ui.lastRun = ""; notify();
+  try { await fn(...args); } finally {
+    state.ui.run = null;
+    if ($("toolSelect")?.value) await refreshBalance().catch(() => {});
+    const secs = (Date.now() - start) / 1000;
+    if (secs >= 3) state.ui.lastRun = runSummary(state.items.filter(isDone).length - done0, state.items.filter((i) => i.status === "Error").length, secs, credit0 - Number(state.ui.credit));
+    if (state.ui.lastRun) log(`Tổng kết: ${state.ui.lastRun}.`);
+    notify();
+  }
+});
+function runSummary(done, errors, secs, used) {
+  const credit = Number.isFinite(used) && used >= 0 ? `, dùng ${used.toLocaleString("vi-VN")} credit` : "";
+  return `${done} dòng xong, ${errors} lỗi, ${clock(secs)}${credit}`;
+}
+function clock(secs) {
+  const s = Math.max(0, Math.round(secs)), h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, r = String(s % 60).padStart(2, "0");
+  return h ? `${h}:${String(m).padStart(2, "0")}:${r}` : `${m}:${r}`;
+}
+// Thời gian còn lại theo tốc độ trung bình của lần chạy này; chưa xong dòng nào thì chưa đoán.
+function eta(run, doneNow, left, now = Date.now()) {
+  const elapsed = (now - run.start) / 1000, rate = (doneNow - run.done0) / elapsed;
+  return { elapsed, left: rate > 0 && left > 0 ? left / rate : null };
+}
 // Render lại: bỏ job cũ và mã chống trùng, nếu không AIVIE trả lại đúng job cũ.
 function rerender(items) {
   const targets = items.filter(Boolean);
@@ -1487,7 +1528,7 @@ export function boot() {
   { const el = $("joinGap"); try { const v = localStorage.getItem("nv.joinGap"); if (v !== null && el) el.value = v; } catch {} el?.addEventListener("change", () => { try { localStorage.setItem("nv.joinGap", el.value); } catch {} }); }
   syncOwnKeyFields(); renderSavedVoices(); bootConnection();
 }
-export const selectors = { voiceModels, visibleItems, fileStatus, statusView, isDone, isActive, summary: () => {
+export const selectors = { clock, eta, voiceModels, visibleItems, fileStatus, statusView, isDone, isActive, summary: () => {
   const visible = visibleItems(), done = visible.filter(isDone).length, active = visible.filter(isActive).length, errors = visible.filter((item) => item.status === "Error").length;
   return { total: visible.length, done, active, errors, files: state.batchFiles.length, filesDone: state.batchFiles.filter((file) => fileStatus(file.source) === "Done").length };
 } };
