@@ -23,3 +23,7 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## Google Sans (font)
+- Nguồn: Google Fonts, đóng gói qua npm `@fontsource-variable/google-sans` 5.3.2.
+- Giấy phép: SIL Open Font License 1.1 (https://openfontlicense.org). Được dùng và đóng kèm trong phần mềm bán, không được bán riêng font.

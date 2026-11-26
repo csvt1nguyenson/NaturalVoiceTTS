@@ -1,8 +1,6 @@
 @import "tailwindcss";
 @import "tw-animate-css";
-@import "@fontsource/ibm-plex-sans/400.css";
-@import "@fontsource/ibm-plex-sans/500.css";
-@import "@fontsource/ibm-plex-sans/600.css";
+@import "@fontsource-variable/google-sans/wght.css";
 @import "@fontsource/ibm-plex-mono/400.css";
 
 @custom-variant dark (&:is(.dark *));
@@ -21,7 +19,7 @@
   --border: oklch(1 0 0 / 10%); --input: oklch(1 0 0 / 15%); --ring: oklch(0.556 0 0);
 }
 @theme inline {
-  --font-sans: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-sans: "Google Sans Variable", "Segoe UI", system-ui, sans-serif;
   --font-mono: "IBM Plex Mono", Consolas, monospace;
   --radius-sm: calc(var(--radius) - 4px); --radius-md: calc(var(--radius) - 2px); --radius-lg: var(--radius); --radius-xl: calc(var(--radius) + 4px);
   --color-background: var(--background); --color-foreground: var(--foreground);
@@ -55,7 +53,7 @@
   .check input::after { content: ""; @apply absolute top-0.5 left-0.5 size-3.5 rounded-full bg-foreground transition-transform; }
   .check input:checked::after { @apply translate-x-3.5 bg-primary-foreground; }
   .fold { @apply border-b; }
-  .fold > summary { @apply flex cursor-pointer items-center justify-between px-4 py-3 text-sm font-medium select-none hover:text-muted-foreground; list-style: none; }
+  .fold > summary { @apply flex cursor-pointer items-center justify-between px-4 py-3 text-sm font-bold select-none hover:text-muted-foreground; list-style: none; }
   .fold > summary::after { content: ""; @apply mr-0.5 size-1.5 rotate-45 border-r-[1.5px] border-b-[1.5px] border-muted-foreground transition-transform; }
   .fold[open] > summary::after { @apply rotate-[225deg]; }
   summary::-webkit-details-marker { display: none; }

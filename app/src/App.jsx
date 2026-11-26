@@ -38,7 +38,7 @@ function Header() {
   return (
     <header className="flex items-center justify-between border-b px-4">
       <div className="flex items-baseline gap-3">
-        <span className="text-[15px] font-semibold tracking-tight">NaturalVoice</span>
+        <span className="text-[15px] font-bold tracking-tight">NaturalVoice</span>
         <span className="text-xs text-muted-foreground">{ui.appVersion}</span>
         <span className="text-xs text-muted-foreground">Text &amp; subtitle sang giọng nói qua AIVIE</span>
       </div>
@@ -181,7 +181,7 @@ const Source = memo(function Source() {
       <input id="batchFolderInput" {...fileInput(actions.addBatchFiles, ".txt", true)} />
       <input id="singleFileInput" {...fileInput((f) => actions.addSingleFiles(f), ".srt,.txt,.dgt")} />
       <input id="singleFolderInput" {...fileInput((f) => actions.addSingleFiles(f, "folder"), ".srt,.txt,.dgt", true)} />
-      <h2 className="mr-2 text-sm font-semibold">Nguồn</h2>
+      <h2 className="mr-2 text-sm font-bold">Nguồn</h2>
       <Input id="batchFolderName" aria-label="Thư mục chứa .txt" className="h-8 min-w-40 flex-1" placeholder="Dán đường dẫn thư mục chứa .txt"
         onPaste={() => setTimeout(actions.scanBatchPath, 50)} onKeyDown={(e) => { if (e.key === "Enter") actions.scanBatchPath(); }} />
       <Btn title="Chọn thư mục .txt, audio lưu cạnh file gốc" onClick={actions.pickBatchFolder}>Chọn thư mục</Btn>
@@ -216,7 +216,7 @@ function FileList() {
   return (
     <Card className="grid min-h-0 grid-rows-[auto_1fr] gap-0 overflow-hidden rounded-2xl py-0 shadow-none">
       <div className="flex h-11 items-center justify-between border-b px-3">
-        <h2 className="text-sm font-semibold">File <span className="ml-1 font-normal text-muted-foreground">{state.batchFiles.length || ""}</span></h2>
+        <h2 className="text-sm font-bold">File <span className="ml-1 font-normal text-muted-foreground">{state.batchFiles.length || ""}</span></h2>
         <Btn size="xs" disabled={state.running || !state.batchFiles.length} onClick={actions.clearBatch}>Xoá danh sách</Btn>
       </div>
       <ul className="min-h-0 overflow-y-auto p-1.5">
@@ -277,7 +277,7 @@ function Lines() {
   return (
     <Card className="grid min-h-0 grid-rows-[auto_1fr] gap-0 overflow-hidden rounded-2xl py-0 shadow-none">
       <div className="flex min-h-11 flex-wrap items-center justify-between gap-x-3 gap-y-1.5 border-b px-3 py-1.5">
-        <h2 className="min-w-0 truncate text-sm font-semibold">{name || "Chi tiết"} {!none && <span className="ml-1 font-normal text-muted-foreground">{s.done} / {s.total} xong{s.errors ? ` · ${s.errors} lỗi` : ""}</span>}</h2>
+        <h2 className="min-w-0 truncate text-sm font-bold">{name || "Chi tiết"} {!none && <span className="ml-1 font-normal text-muted-foreground">{s.done} / {s.total} xong{s.errors ? ` · ${s.errors} lỗi` : ""}</span>}</h2>
         <div className="flex flex-wrap items-center gap-1.5">
           <Btn size="xs" disabled={state.running || !todo} title="Chỉ chạy file đang chọn" onClick={actions.start}>Chạy file này</Btn>
           <Btn size="xs" disabled={state.running || none} title="Render lại mọi dòng của file đang chọn, thay file cũ" onClick={() => actions.rerender(items)}>Render lại file</Btn>
@@ -316,7 +316,7 @@ function Log() {
   return (
     <Card className="gap-0 overflow-hidden rounded-2xl py-0 shadow-none">
       <details open>
-        <summary className="flex h-9 cursor-pointer items-center justify-between px-3 text-sm font-semibold">
+        <summary className="flex h-9 cursor-pointer items-center justify-between px-3 text-sm font-bold">
           <span>Log</span>
           <span className="flex items-center gap-2"><Btn size="xs" title="Mở file log của hôm nay" onClick={(e) => { e.preventDefault(); actions.openLogFile(); }}>Mở file log</Btn><span className="text-xs font-normal text-muted-foreground">{logCount} dòng</span></span>
         </summary>
@@ -331,7 +331,7 @@ function Jobs() {
   if (!state.ui.jobsOpen) return null;
   return (
     <Card className="max-h-56 gap-0 overflow-y-auto rounded-2xl py-0 shadow-none">
-      <div className="flex h-11 shrink-0 items-center justify-between border-b px-3"><h2 className="text-sm font-semibold">Jobs AIVIE</h2><Btn onClick={actions.refreshJobs}>Cập nhật</Btn></div>
+      <div className="flex h-11 shrink-0 items-center justify-between border-b px-3"><h2 className="text-sm font-bold">Jobs AIVIE</h2><Btn onClick={actions.refreshJobs}>Cập nhật</Btn></div>
       <Table><Head cols={[["Job ID"], ["Tiêu đề"], ["Trạng thái"], ["Credit"], [""]]} /><TableBody>
         {state.ui.jobs.map((job, i) => {
           const id = job.job_id || job.id || "";
